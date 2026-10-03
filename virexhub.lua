@@ -10,7 +10,55 @@
 --   safe         -> step-walk to the egg (anti-detect)
 --   instant      -> CFrame snap to the egg slot, then carry
 --   instant-only -> CFrame snap replaces the walk entirely
+--
+-- ── HOW TO RUN ───────────────────────────────────────
+-- Copy this line into your executor:
+--
+--   loadstring(game:HttpGet("https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"))()
+--
+-- This file is a bare chunk (no `return`, no `require`) on purpose, so it
+-- loads standalone. It will NOT work as a Roblox ModuleScript.
+--
+-- Config tab has a "Reload script" button + F9 hotkey that re-fetch and
+-- re-run this same URL via loadstring while you iterate.
 -- ======================================================
+
+-- ── RELOAD SAFETY ────────────────────────────────────
+-- A reload creates a brand-new closure, so the previous run's Engine/threads
+-- can't be stopped by name from here. Keep a handle in the shared global
+-- table and shut the old run down before anything else is built.
+local HOST     = (getgenv and getgenv()) or _G
+local PREVIOUS = rawget(HOST, "VirexHub")
+if type(PREVIOUS) == "table" and type(PREVIOUS.shutdown) == "function" then
+    pcall(PREVIOUS.shutdown)
+end
+
+local RUN = {
+    shutdown = function() end, -- replaced further down
+}
+
+-- ── LOADER (loadstring) ──────────────────────────────
+local SCRIPT_URL = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
+
+local HAS_LOADSTRING = (type(loadstring) == "function") or (type(load) == "function")
+
+local function reloadScript()
+    -- NOTE: LOG_* colour constants are declared further down, so don't
+    -- reference them here — log() falls back to its default grey.
+    if not HAS_LOADSTRING then
+        if RUN.log then RUN.log("loadstring unavailable — cannot hot-reload") end
+        return
+    end
+    pcall(function()
+        if RUN.shutdown then RUN.shutdown() end
+        if RUN.gui and RUN.gui.Parent then RUN.gui:Destroy() end
+        if RUN.log then RUN.log("Reloading from GitHub...") end
+        local src = game:HttpGet(SCRIPT_URL, true)
+        local fn  = loadstring and loadstring(src) or load(src)
+        if fn then fn() end
+    end)
+end
+RUN.reload = reloadScript
 
 local Players                = game:GetService("Players")
 local UIS                    = game:GetService("UserInputService")
@@ -77,6 +125,7 @@ local gui = Instance.new("ScreenGui")
 gui.Name="VirexAntiGuard"; gui.ResetOnSpawn=false; gui.IgnoreGuiInset=true
 gui.DisplayOrder=9999; gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; gui.Parent=PlayerGui
 Instance.new("UIScale",gui).Scale = 0.90
+RUN.gui = gui
 
 local shadow = Instance.new("Frame")
 shadow.Name="Shadow"; shadow.AnchorPoint=Vector2.new(0.5,0.5)
@@ -322,6 +371,7 @@ local function log(msg, color)
         consolePage.CanvasPosition = Vector2.new(0, math.huge)
     end)
 end
+RUN.log = log
 
 clearBtn.Activated:Connect(function()
     for _, l in ipairs(logLines) do if l and l.Parent then l:Destroy() end end
@@ -2004,10 +2054,62 @@ end)
 refreshTabs()
 
 -- ======================================================
+-- RELOAD / SHUTDOWN
+-- ======================================================
+-- Anything long-lived must be reachable from here, otherwise a reload leaves
+-- an orphaned engine thread looping forever on the previous run's closure.
+RUN.shutdown = function()
+    pcall(function() if StealEnabled or Engine:IsEnabled() then
+        StealEnabled = false; Engine:Disable()
+    end end)
+    pcall(function() if AutoRunning or AutoRunEnabled then
+        AutoRunEnabled = false; AutoRunning = false; stopSpeedForce()
+    end end)
+    pcall(function() AntiHitEnabled = false end)
+    pcall(function() gui:Destroy() end)
+end
+
+rawset(HOST, "VirexHub", RUN)
+
+local reloadBtn = cfgBtn("⟳  Reload script from GitHub" .. (HAS_LOADSTRING and "" or "  (no loadstring)"))
+reloadBtn.TextColor3 = HAS_LOADSTRING and LOG_INFO or Color3.fromRGB(120,120,130)
+reloadBtn.Activated:Connect(function()
+    playClick()
+    if not HAS_LOADSTRING then
+        log("loadstring unavailable in this environment", LOG_ERR)
+        return
+    end
+    reloadScript()
+end)
+
+local urlBtn = cfgBtn("🔗  Copy loader one-liner")
+urlBtn.TextColor3 = Color3.fromRGB(150,150,165)
+urlBtn.Activated:Connect(function()
+    playClick()
+    local line = 'loadstring(game:HttpGet("'..SCRIPT_URL..'"))()'
+    local ok = pcall(function() setclipboard(line) end)
+    if not ok then pcall(function() syn.clipboard.set(line) end) end
+    if not ok then pcall(function() Clipboard.set(line) end) end
+    log(ok and "Loader one-liner copied to clipboard" or "Could not reach clipboard", ok and LOG_OK or LOG_WARN)
+end)
+
+-- F9 = reload. Runs a frame later so the press isn't caught by this run.
+UIS.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.F9 then
+        task.defer(function()
+            if HAS_LOADSTRING then reloadScript() end
+        end)
+        return
+    end
+end)
+
+-- ======================================================
 -- STARTUP LOG
 -- ======================================================
 task.delay(1, function()
     log("=== VIREX ANTI-GUARD v3 (merged) ===", LOG_OK)
+    log("loadstring: "..(HAS_LOADSTRING and "available (F9 = reload)" or "UNAVAILABLE"), HAS_LOADSTRING and LOG_OK or LOG_WARN)
     log("Carry remote: "..(CarryRemote and CarryRemote:GetFullName() or "NOT FOUND"), CarryRemote and LOG_OK or LOG_ERR)
     log("Drop  remote: "..(DropRemote  and DropRemote:GetFullName()  or "NOT FOUND"), DropRemote  and LOG_INFO or LOG_WARN)
     log("Steal engine ready — mode="..Engine:GetMode(), LOG_INFO)
