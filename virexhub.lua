@@ -459,27 +459,110 @@ local AllScannedEggs = {}          -- [{Uid, Instance, Rarity, Position}]
 local SelectedRarities = {}        -- rarity -> true
 for _, r in ipairs(TargetSelector.RARITY_ORDER) do SelectedRarities[r] = true end
 
-local function readRarity(obj)
-    -- 1) attributes
-    for _, key in ipairs({"Rarity","EggRarity","RarityName","Tier"}) do
-        local v = obj:GetAttribute(key)
-        if typeof(v) == "string" and v ~= "" then return v end
-    end
-    -- 2) config table
-    local ok, res = pcall(function()
-        local packages = ReplicatedStorage:FindFirstChild("Packages")
-        local net = packages and packages:FindFirstChild("Networking")
-        local c = net and net:FindFirstChild("EggConfig")
-        if c then
-            if c:IsA("RemoteFunction") then return c:InvokeServer() end
-            return c:GetAttribute("Eggs")
+-- ── EGG CONFIG INDEX ─────────────────────────────────
+-- Rarity isn't on the egg instance; it lives in a config table somewhere in
+-- ReplicatedStorage keyed by egg id. Build the index once, then look up by
+-- full name, numeric id, or slot base name (any of the three can match).
+local EggConfigIndex = nil
+
+local function indexConfigTable(tbl, out, depth)
+    if type(tbl) ~= "table" or depth > 3 then return end
+    for key, val in pairs(tbl) do
+        if type(val) == "table" then
+            local rarity = val.Rarity or val.EggRarity or val.RarityName
+            if type(rarity) == "string" then
+                if type(key) == "string" or type(key) == "number" then
+                    out[tostring(key)] = rarity
+                end
+                for _, idk in ipairs({"Id","ID","EggId","Name","Uid","UID"}) do
+                    if type(val[idk]) == "string" or type(val[idk]) == "number" then
+                        out[tostring(val[idk])] = rarity
+                    end
+                end
+            end
+            indexConfigTable(val, out, depth + 1)
         end
-        return nil
-    end)
-    if ok and type(res) == "table" then
-        local entry = res[obj.Name]
-        if type(entry) == "table" and type(entry.Rarity) == "string" then return entry.Rarity end
-        if type(entry) == "string" then return entry end
+    end
+end
+
+local function buildEggConfigIndex()
+    if EggConfigIndex then return EggConfigIndex end
+    EggConfigIndex = {}
+    local roots = { ReplicatedStorage }
+    local pkgs = ReplicatedStorage:FindFirstChild("Packages")
+    if pkgs then table.insert(roots, pkgs) end
+
+    for _, root in ipairs(roots) do
+        for _, obj in ipairs(root:GetDescendants()) do
+            local n = string.lower(obj.Name or "")
+            if string.find(n, "egg", 1, true) then
+                local got = false
+                if obj:IsA("RemoteFunction") then
+                    local ok, val = pcall(function() return obj:InvokeServer() end)
+                    if ok and type(val) == "table" then indexConfigTable(val, EggConfigIndex, 0); got = true end
+                elseif obj:IsA("ModuleScript") then
+                    local ok, val = pcall(function() return require(obj) end)
+                    if ok and type(val) == "table" then indexConfigTable(val, EggConfigIndex, 0); got = true end
+                elseif obj:IsA("Folder") or obj:IsA("Configuration") then
+                    for k, v in pairs(obj:GetAttributes()) do
+                        if typeof(v) == "string" and string.find(string.lower(k), "rarity", 1, true) then
+                            EggConfigIndex[obj.Name] = v; got = true
+                        end
+                    end
+                end
+                if got then log("EggConfig indexed from "..obj:GetFullName(), LOG_INFO) end
+            end
+        end
+    end
+    return EggConfigIndex
+end
+
+-- Pull candidate lookup keys out of names like
+-- FirstAreaEgg_10605759721_5970123_Forest:Slot_002
+local function nameCandidates(name)
+    local out = { name }
+    local id  = string.match(name, "(%d+)")
+    if id then table.insert(out, id) end
+    local base = string.match(name, "^(.-):Slot")
+    if base then
+        table.insert(out, base)
+        local bid = string.match(base, "(%d+)")
+        if bid then table.insert(out, bid) end
+    end
+    return out
+end
+
+local function readRarity(obj, model)
+    -- 1) attributes on the container entry / model
+    local objs = { obj }
+    if model and model ~= obj then table.insert(objs, model) end
+    for _, o in ipairs(objs) do
+        for _, key in ipairs({"Rarity","EggRarity","RarityName","Tier"}) do
+            local v = o:GetAttribute(key)
+            if typeof(v) == "string" and v ~= "" then return v end
+        end
+    end
+    -- 2) rarity-named children (StringValue / ObjectValue)
+    if model then
+        for _, d in ipairs(model:GetDescendants()) do
+            for _, key in ipairs({"Rarity","EggRarity","RarityName","Tier"}) do
+                local v = d:GetAttribute(key)
+                if typeof(v) == "string" and v ~= "" then return v end
+            end
+            if d:IsA("StringValue") and string.find(string.lower(d.Name), "rarity", 1, true) then
+                if d.Value ~= "" then return d.Value end
+            elseif d:IsA("ObjectValue") and d.Value then
+                local vn = string.lower(d.Value.Name)
+                for _, r in ipairs(TargetSelector.RARITY_ORDER) do
+                    if string.find(vn, string.lower(r), 1, true) then return r end
+                end
+            end
+        end
+    end
+    -- 3) config index
+    local idx = buildEggConfigIndex()
+    for _, cand in ipairs(nameCandidates(obj.Name)) do
+        if idx[cand] then return idx[cand] end
     end
     return "Common"
 end
@@ -503,14 +586,26 @@ function TargetSelector.scanEggs()
         local key = (okId and id) or tostring(model)
         if seen[key] then return end
         seen[key] = true
+
+        -- This game drives egg pickup off a ProximityPrompt living on a
+        -- part called SmartPromptPart, so the prompt is the real handle.
+        local prompt = nil
+        pcall(function() prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true) end)
+
         local pos = nil
-        local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
-        if part then pos = part.Position end
+        local part = (prompt and prompt.Parent)
+            or model.PrimaryPart
+            or model:FindFirstChildWhichIsA("BasePart", true)
+        if part and part:IsA("BasePart") then pos = part.Position end
+
         table.insert(AllScannedEggs, {
             Uid     = inst.Name,
             Instance= model,
-            Rarity  = readRarity(inst),
+            Rarity  = readRarity(inst, model),
             Position= pos,
+            Prompt  = prompt,
+            PromptPart = (prompt and prompt.Parent) or nil,
+            HoldDuration = (prompt and prompt.HoldDuration) or 0,
         })
     end
 
@@ -537,20 +632,32 @@ function TargetSelector.scanEggs()
     for _, e in ipairs(AllScannedEggs) do
         if SelectedRarities[e.Rarity] == nil then SelectedRarities[e.Rarity] = true end
     end
+
+    local withPrompt = 0
+    for _, e in ipairs(AllScannedEggs) do if e.Prompt then withPrompt += 1 end end
+    log(string.format("Scan: %d eggs, %d with a ProximityPrompt", #AllScannedEggs, withPrompt),
+        withPrompt > 0 and LOG_OK or LOG_ERR)
     return AllScannedEggs
 end
 
 function TargetSelector.getSlotPosition(egg)
     if type(egg) == "table" then
+        -- Prefer the live prompt position when we have one, else the
+        -- cached position from the scan.
+        if egg.PromptPart and egg.PromptPart.Parent then
+            return egg.PromptPart.Position
+        end
         if egg.Position then return egg.Position end
         egg = egg.Instance
     end
     if not egg then return nil end
-    local part = egg:FindFirstChild("Spawn", true)
+    local promptPart = nil
+    pcall(function() promptPart = egg:FindFirstChild("SmartPromptPart", true) end)
+    local part = promptPart
+        or egg:FindFirstChild("Spawn", true)
         or egg.PrimaryPart
         or egg:FindFirstChildWhichIsA("BasePart", true)
     if not part then return nil end
-    -- the interactable point sits slightly above the model pivot
     local p = part.Position
     local alt = egg:FindFirstChild("AltInteractPoint", true)
     if alt and alt:IsA("BasePart") then p = alt.Position end
@@ -565,6 +672,24 @@ function TargetSelector.isRaritySelected(rarity)
     return SelectedRarities[rarity] == true
 end
 
+local Blacklisted = {}   -- uid -> os.clock() expiry
+
+function TargetSelector.markFailed(uid, seconds)
+    if not uid then return end
+    Blacklisted[uid] = os.clock() + (seconds or 25)
+end
+
+function TargetSelector.clearFailed(uid)
+    if uid then Blacklisted[uid] = nil end
+end
+
+function TargetSelector.isBlocked(uid)
+    local untilTime = Blacklisted[uid]
+    if not untilTime then return false end
+    if os.clock() >= untilTime then Blacklisted[uid] = nil; return false end
+    return true
+end
+
 function TargetSelector._sortedRarities(present)
     local out = {}
     for _, r in ipairs(TargetSelector.RARITY_ORDER) do
@@ -574,7 +699,9 @@ function TargetSelector._sortedRarities(present)
 end
 
 -- Highest-priority egg inside MaxRange; nil if none match.
-function TargetSelector.pickTarget(localPlayer, maxRange)
+-- `skip` holds uids the caller already rejected this cycle.
+function TargetSelector.pickTarget(localPlayer, maxRange, skip)
+    skip = skip or {}
     if #AllScannedEggs == 0 then TargetSelector.scanEggs() end
     local root = WalkGround.getRoot(localPlayer)
     if not root then return nil end
@@ -582,7 +709,9 @@ function TargetSelector.pickTarget(localPlayer, maxRange)
 
     local byRarity = {}
     for _, e in ipairs(AllScannedEggs) do
-        if TargetSelector.isRaritySelected(e.Rarity) and e.Position then
+        local reject = TargetSelector.isBlocked(e.Uid)
+        if not reject and skip[e.Uid] then reject = true end
+        if not reject and TargetSelector.isRaritySelected(e.Rarity) and e.Position then
             local d = (e.Position - root.Position).Magnitude
             if d <= maxRange then
                 byRarity[e.Rarity] = byRarity[e.Rarity] or {}
@@ -706,13 +835,15 @@ local AutoSteal = {}
 AutoSteal.__index = AutoSteal
 
 local STEAL_DEFAULTS = {
-    WalkSpeed    = 120,
-    MaxRange     = 900,
-    ApproachDist = 6,
-    StepDelay    = 0.06,
-    CarryTimeout = 1.2,
-    AutoReturn   = true,
-    AutoDropEgg  = false,
+    WalkSpeed       = 120,
+    MaxRange        = 900,
+    ApproachDist    = 6,
+    StepDelay       = 0.06,
+    CarryTimeout    = 1.2,
+    CarryMethod     = "prompt",   -- "prompt" | "remote" | "both"
+    FailureCooldown = 25,
+    AutoReturn      = true,
+    AutoDropEgg     = false,
 }
 
 local FALLBACK_BASE = Vector3.new(533,70,-366)
@@ -782,9 +913,61 @@ function AutoSteal:_isCarrying()
     return false
 end
 
-function AutoSteal:_tryCarry(uid)
-    if not CarryRemote then return false end
-    return pcall(function() CarryRemote:InvokeServer(uid) end)
+-- ── CARRY ────────────────────────────────────────────
+-- Two mechanisms, tried in the order the config asks for:
+--   "prompt" → fireproximityprompt on the egg's ProximityPrompt.
+--              This is what the game actually listens to; the remote alone
+--              never moves the egg.
+--   "remote" → AskFieldEggCarry:InvokeServer with several plausible arg
+--              shapes, since we don't know the server's expected signature.
+-- Returns true if a mechanism dispatched without error (not proof of pickup
+-- — always re-check _isCarrying).
+function AutoSteal:_tryCarry(egg)
+    if type(egg) == "string" then egg = { Uid = egg } end
+    if not egg then return false end
+    local method = self._config.CarryMethod or "prompt"
+    local uid    = egg.Uid
+    local prompt = egg.Prompt
+
+    -- refresh the handle in case the container rebuilt
+    if (not prompt or not prompt.Parent) and egg.Instance then
+        pcall(function() prompt = egg.Instance:FindFirstChildWhichIsA("ProximityPrompt", true) end)
+        egg.Prompt = prompt
+    end
+
+    local dispatched = false
+
+    if (method == "prompt" or method == "both") and prompt then
+        if type(fireproximityprompt) == "function" then
+            dispatched = pcall(fireproximityprompt, prompt) or dispatched
+        else
+            log("fireproximityprompt missing — cannot use prompt carry", LOG_ERR)
+        end
+    end
+
+    if method == "remote" or method == "both" or (not dispatched) then
+        if CarryRemote then
+            for _, arg in ipairs({ uid, { uid }, egg.Instance }) do
+                local ok = pcall(function() CarryRemote:InvokeServer(arg) end)
+                if ok then dispatched = true end
+            end
+        end
+    end
+
+    -- Hold-duration prompts need a moment of simulated input on some
+    -- executors; give the prompt a nudge if nothing registered.
+    if not self:_isCarrying() and prompt then
+        task.defer(function()
+            pcall(function()
+                prompt.HoldDuration = 0
+                prompt.RequiresLineOfSight = false
+                prompt.MaxActivationDistance = 128
+                if type(fireproximityprompt) == "function" then fireproximityprompt(prompt) end
+            end)
+        end)
+    end
+
+    return dispatched
 end
 
 function AutoSteal:_tryDrop()
@@ -850,18 +1033,26 @@ function AutoSteal:RunOnce()
     -- carry retry window
     local cdl = os.clock() + self._config.CarryTimeout
     while os.clock() < cdl do
-        self:_tryCarry(egg.Uid)
+        self:_tryCarry(egg)
         if self:_isCarrying() then break end
         task.wait(0.08)
     end
     local carrying = self:_isCarrying()
+
+    if carrying then
+        TargetSelector.clearFailed(egg.Uid)
+    else
+        -- stop hammering this egg; move on to the next one for a while
+        TargetSelector.markFailed(egg.Uid, self._config.FailureCooldown)
+        log("Steal[walk]: FAILED "..egg.Uid.." — skipping for "..math.floor(self._config.FailureCooldown).."s", LOG_ERR)
+    end
 
     if carrying and self._config.AutoReturn then self:_safeReturn() end
     if carrying and self._config.AutoDropEgg  then self:_tryDrop() end
 
     restoreSpeed(); self._running = false
     self:_fireComplete(carrying, carrying and "ok" or "grab failed")
-    log(carrying and ("Steal[walk]: grabbed "..egg.Uid) or ("Steal[walk]: FAILED "..egg.Uid), carrying and LOG_OK or LOG_ERR)
+    if carrying then log("Steal[walk]: grabbed "..egg.Uid, LOG_OK) end
 end
 
 function AutoSteal:_safeReturn()
@@ -999,7 +1190,10 @@ function Test1:_instantCycle()
         return
     end
     local target = TargetSelector.pickTarget(autoSteal._localPlayer, autoSteal._config.MaxRange)
-    if not target then return end
+    if not target then
+        self._stats.idle = (self._stats.idle or 0) + 1
+        return
+    end
     self:_instantSteal(target)
 end
 
@@ -1018,7 +1212,7 @@ function Test1:_instantSteal(egg)
     local deadline = os.clock() + self._config.GrabDelay
     while os.clock() < deadline and self._enabled do
         if autoSteal:_isCarrying() then task.wait(0.05); break end
-        autoSteal:_tryCarry(uid)
+        autoSteal:_tryCarry(egg)
         if autoSteal:_isCarrying() then task.wait(0.05); break end
         task.wait(0.03)
     end
@@ -1026,10 +1220,14 @@ function Test1:_instantSteal(egg)
     local carrying = autoSteal:_isCarrying()
     if carrying then
         self._stats.grabs += 1
+        TargetSelector.clearFailed(uid)
+        log("Steal[instant]: grabbed "..uid, LOG_OK)
         if autoSteal._config.AutoReturn then self:_instantReturn() end
         if autoSteal._config.AutoDropEgg  then autoSteal:_tryDrop() end
     else
         self._stats.fails += 1
+        TargetSelector.markFailed(uid, autoSteal._config.FailureCooldown)
+        log("Steal[instant]: FAILED "..uid, LOG_ERR)
     end
     return carrying
 end
@@ -1072,13 +1270,15 @@ local Engine = Test1.new({
         CycleDelay      = 0.20,
     },
     StealConfig = {
-        WalkSpeed    = 120,
-        MaxRange     = 900,
-        ApproachDist = 6,
-        StepDelay    = 0.06,
-        CarryTimeout = 1.20,
-        AutoReturn   = true,
-        AutoDropEgg  = false,
+        WalkSpeed       = 120,
+        MaxRange        = 900,
+        ApproachDist    = 6,
+        StepDelay       = 0.06,
+        CarryTimeout    = 1.20,
+        CarryMethod     = "prompt",
+        FailureCooldown = 25,
+        AutoReturn      = true,
+        AutoDropEgg     = false,
     },
 })
 
@@ -1407,6 +1607,10 @@ end
 
 local function startAutoRun()
     if AutoRunning then log("AutoRun: already running, skip",LOG_WARN); return end
+    -- The walk loop below is gated on AutoRunEnabled, and this function is
+    -- also reached from the prompt handler without the (hidden) card ever
+    -- being toggled — so enable it here or the loop exits instantly.
+    AutoRunEnabled = true
     AutoRunning=true
     log("AutoRun: START — MOVING TO BASE (speed="..RUN_SPEED..")",LOG_OK)
     setArVisual("running","Running to base...")
@@ -1421,14 +1625,19 @@ local function startAutoRun()
             stopAutoRun("no character"); return
         end
 
-        if CarryRemote then
-            local uid = CurrentEggUid
-            if uid == nil and char then uid = char:GetAttribute("CarryingEggUid") end
-            if uid then
-                log("AutoRun: attempting to carry egg '"..tostring(uid).."'", LOG_INFO)
-                pcall(function() CarryRemote:InvokeServer(uid); log("AutoRun: carry remote invoked", LOG_OK) end)
-                task.wait(0.2)
+        local uid = CurrentEggUid
+        if uid == nil and char then uid = char:GetAttribute("CarryingEggUid") end
+        if uid then
+            log("AutoRun: attempting to carry egg '"..tostring(uid).."'", LOG_INFO)
+            -- Route through the engine so this uses the same carry mechanism
+            -- (prompt-first) that the steal path uses.
+            local prompt = nil
+            for _, e in ipairs(AllScannedEggs) do
+                if e.Uid == uid then prompt = e.Prompt; break end
             end
+            Engine:GetSteal():_tryCarry({ Uid = uid, Prompt = prompt })
+            log("AutoRun: carry dispatched", LOG_OK)
+            task.wait(0.2)
         end
 
         startSpeedForce()
@@ -1471,13 +1680,34 @@ setArVisual("off","OFF")
 
 -- ── ProximityPrompt wiring ────────────────────────────
 
+-- prompt.Parent is the part hosting the prompt ("SmartPromptPart"), not the
+-- egg. Walk up the ancestor chain looking for the real egg holder, and prefer
+-- a name that matches something already in the egg scan.
+local function resolveEggUidFromPrompt(prompt)
+    local scanned = {}
+    if #AllScannedEggs == 0 then TargetSelector.scanEggs() end
+    for _, e in ipairs(AllScannedEggs) do scanned[e.Uid] = true end
+
+    local cur = prompt.Parent
+    for _ = 1, 10 do
+        if not cur then break end
+        if scanned[cur.Name] then return cur.Name end
+        local n = string.lower(cur.Name)
+        if string.find(n, "egg", 1, true) and not string.find(n, "prompt", 1, true) then
+            return cur.Name
+        end
+        cur = cur.Parent
+    end
+    return prompt.Parent and prompt.Parent.Name or nil
+end
+
 ProximityPromptService.PromptTriggered:Connect(function(prompt, player)
     if player ~= Player then return end
 
-    local eggModel = prompt.Parent
-    if eggModel and eggModel.Parent then
-        CurrentEggUid = eggModel.Name
-        log("AntiHit: captured egg = "..CurrentEggUid, LOG_INFO)
+    local uid = resolveEggUidFromPrompt(prompt)
+    if uid then
+        CurrentEggUid = uid
+        log("AntiHit: captured egg = "..uid, LOG_INFO)
     end
 
     log("ProximityPrompt fired! AntiHit="..(AntiHitEnabled and "ON" or "OFF"), LOG_INFO)
@@ -1600,6 +1830,33 @@ modeInst.Activated:Connect(function() playClick(); Engine:SetMode("instant");   
 modeOnly.Activated:Connect(function() playClick(); Engine:SetMode("instant-only");refreshModeButtons(); log("Steal mode = INSTANT-ONLY", LOG_WARN) end)
 refreshModeButtons()
 
+-- ── CARRY METHOD ─────────────────────────────────────
+cfgLabel("CARRY METHOD  (how the egg is picked up)")
+local carryRow=Instance.new("Frame"); carryRow.Size=UDim2.new(1,-8,0,40)
+carryRow.BackgroundTransparency=1; carryRow.Parent=configPage
+local carryPrompt = segBtn(carryRow, 0.335, 0,     "PROMPT")
+local carryRemote = segBtn(carryRow, 0.335, 0.335, "REMOTE")
+local carryBoth   = segBtn(carryRow, 0.33,  0.67,  "BOTH")
+local function refreshCarryButtons()
+    local cur = Engine:GetSteal():GetConfig().CarryMethod
+    local sel = (cur == "remote") and carryRemote or (cur == "both" and carryBoth or carryPrompt)
+    for _, b in ipairs({carryPrompt, carryRemote, carryBoth}) do
+        b.BackgroundColor3 = (b == sel) and Color3.fromRGB(35,120,200) or Themes[1].Panel
+    end
+end
+local function setCarryMethod(m)
+    playClick(); Engine:GetSteal():SetConfig({CarryMethod=m}); refreshCarryButtons()
+    log("Carry method = "..m..(m == "prompt" and (type(fireproximityprompt)=="function" and "" or "  (fireproximityprompt MISSING!)")), LOG_INFO)
+end
+carryPrompt.Activated:Connect(function() setCarryMethod("prompt") end)
+carryRemote.Activated:Connect(function() setCarryMethod("remote") end)
+carryBoth.Activated:Connect(function()   setCarryMethod("both") end)
+refreshCarryButtons()
+
+if type(fireproximityprompt) ~= "function" then
+    log("fireproximityprompt not available in this executor — use REMOTE or BOTH", LOG_ERR)
+end
+
 -- ── STEAL TUNING ─────────────────────────────────────
 makeStepper("GRAB DELAY  (sec)", 0.55, 0.10, 3.00, 0.05, function(v) return string.format("%.2f s", v) end,
     function(v) Engine:SetConfig({GrabDelay=v}) end)
@@ -1615,6 +1872,9 @@ makeStepper("STEAL WALK SPEED", 120, 16, 400, 10, function(v) return tostring(v)
 
 makeStepper("STEAL MAX RANGE  (studs)", 900, 50, 5000, 50, function(v) return tostring(v) end,
     function(v) Engine:GetSteal():SetConfig({MaxRange=v}) end)
+
+makeStepper("FAIL COOLDOWN  (sec)", 25, 5, 180, 5, function(v) return v.." s" end,
+    function(v) Engine:GetSteal():SetConfig({FailureCooldown=v}) end)
 
 makeToggle("BYPASS ANTI-CHEAT", true, function(on)
     Engine:SetConfig({BypassAntiCheat=on})
@@ -1978,79 +2238,82 @@ end)
 openBtn.Activated:Connect(function() playClick(); if minimized then restoreMin() else openGui() end end)
 
 -- ======================================================
--- INTRO
--- ======================================================
-main.Visible=false; shadow.Visible=false; dragHandle.Visible=false; resizeHandle.Visible=false
+local function runIntro()
+    -- INTRO
+    -- ======================================================
+    main.Visible=false; shadow.Visible=false; dragHandle.Visible=false; resizeHandle.Visible=false
 
-local intro=Instance.new("Frame"); intro.Name="VirexIntro"; intro.Size=UDim2.fromScale(1,1)
-intro.BackgroundColor3=Color3.fromRGB(0,0,0); intro.BackgroundTransparency=0.20
-intro.BorderSizePixel=0; intro.ZIndex=100; intro.Parent=gui
+    local intro=Instance.new("Frame"); intro.Name="VirexIntro"; intro.Size=UDim2.fromScale(1,1)
+    intro.BackgroundColor3=Color3.fromRGB(0,0,0); intro.BackgroundTransparency=0.20
+    intro.BorderSizePixel=0; intro.ZIndex=100; intro.Parent=gui
 
-local iBg=Instance.new("UIGradient")
-iBg.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(0.38,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(0.5,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(0.62,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(1,Color3.fromRGB(0,0,0))})
-iBg.Rotation=0; iBg.Offset=Vector2.new(1.2,0); iBg.Parent=intro
-task.spawn(function() while gui.Parent and intro.Parent do iBg.Offset=Vector2.new(1.2,0); tw(iBg,TweenInfo.new(2.2,Enum.EasingStyle.Linear),{Offset=Vector2.new(-1.2,0)}).Completed:Wait(); task.wait(0.08) end end)
+    local iBg=Instance.new("UIGradient")
+    iBg.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(0.38,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(0.5,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(0.62,Color3.fromRGB(0,0,0)),ColorSequenceKeypoint.new(1,Color3.fromRGB(0,0,0))})
+    iBg.Rotation=0; iBg.Offset=Vector2.new(1.2,0); iBg.Parent=intro
+    task.spawn(function() while gui.Parent and intro.Parent do iBg.Offset=Vector2.new(1.2,0); tw(iBg,TweenInfo.new(2.2,Enum.EasingStyle.Linear),{Offset=Vector2.new(-1.2,0)}).Completed:Wait(); task.wait(0.08) end end)
 
-local iCard=Instance.new("Frame"); iCard.AnchorPoint=Vector2.new(0.5,0.5)
-iCard.Position=UDim2.fromScale(0.5,0.53); iCard.Size=UDim2.fromOffset(250,155)
-iCard.BackgroundColor3=Color3.fromRGB(14,14,18); iCard.BorderSizePixel=0; iCard.ZIndex=101; iCard.Parent=intro
-Instance.new("UICorner",iCard).CornerRadius=UDim.new(0,18)
-local iStroke=Instance.new("UIStroke"); iStroke.Color=Color3.fromRGB(255,255,255); iStroke.Transparency=0.72; iStroke.Parent=iCard
+    local iCard=Instance.new("Frame"); iCard.AnchorPoint=Vector2.new(0.5,0.5)
+    iCard.Position=UDim2.fromScale(0.5,0.53); iCard.Size=UDim2.fromOffset(250,155)
+    iCard.BackgroundColor3=Color3.fromRGB(14,14,18); iCard.BorderSizePixel=0; iCard.ZIndex=101; iCard.Parent=intro
+    Instance.new("UICorner",iCard).CornerRadius=UDim.new(0,18)
+    local iStroke=Instance.new("UIStroke"); iStroke.Color=Color3.fromRGB(255,255,255); iStroke.Transparency=0.72; iStroke.Parent=iCard
 
-local iTitleLbl=Instance.new("TextLabel"); iTitleLbl.BackgroundTransparency=1
-iTitleLbl.Size=UDim2.new(1,-20,0,45); iTitleLbl.Position=UDim2.fromOffset(10,40)
-iTitleLbl.Font=Enum.Font.GothamBlack; iTitleLbl.Text="VIREX"; iTitleLbl.TextSize=34
-iTitleLbl.TextColor3=Color3.new(1,1,1); iTitleLbl.ZIndex=102; iTitleLbl.Parent=iCard
-local iGr=Instance.new("UIGradient")
-iGr.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,55,75)),ColorSequenceKeypoint.new(0.32,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(0.55,Color3.fromRGB(255,55,75)),ColorSequenceKeypoint.new(0.82,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,55,75))})
-iGr.Offset=Vector2.new(1.1,0); iGr.Parent=iTitleLbl
-task.spawn(function() while gui.Parent and iTitleLbl.Parent do iGr.Offset=Vector2.new(1.1,0); tw(iGr,TweenInfo.new(1.4,Enum.EasingStyle.Linear),{Offset=Vector2.new(-1.1,0)}).Completed:Wait() end end)
+    local iTitleLbl=Instance.new("TextLabel"); iTitleLbl.BackgroundTransparency=1
+    iTitleLbl.Size=UDim2.new(1,-20,0,45); iTitleLbl.Position=UDim2.fromOffset(10,40)
+    iTitleLbl.Font=Enum.Font.GothamBlack; iTitleLbl.Text="VIREX"; iTitleLbl.TextSize=34
+    iTitleLbl.TextColor3=Color3.new(1,1,1); iTitleLbl.ZIndex=102; iTitleLbl.Parent=iCard
+    local iGr=Instance.new("UIGradient")
+    iGr.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,55,75)),ColorSequenceKeypoint.new(0.32,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(0.55,Color3.fromRGB(255,55,75)),ColorSequenceKeypoint.new(0.82,Color3.fromRGB(255,255,255)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,55,75))})
+    iGr.Offset=Vector2.new(1.1,0); iGr.Parent=iTitleLbl
+    task.spawn(function() while gui.Parent and iTitleLbl.Parent do iGr.Offset=Vector2.new(1.1,0); tw(iGr,TweenInfo.new(1.4,Enum.EasingStyle.Linear),{Offset=Vector2.new(-1.1,0)}).Completed:Wait() end end)
 
-local iSub=Instance.new("TextLabel"); iSub.BackgroundTransparency=1
-iSub.Size=UDim2.new(1,-30,0,18); iSub.Position=UDim2.fromOffset(15,88)
-iSub.Font=Enum.Font.FredokaOne; iSub.Text="ANTI-GUARD • LOADING"; iSub.TextSize=10
-iSub.TextColor3=Color3.fromRGB(150,150,160); iSub.ZIndex=102; iSub.Parent=iCard
+    local iSub=Instance.new("TextLabel"); iSub.BackgroundTransparency=1
+    iSub.Size=UDim2.new(1,-30,0,18); iSub.Position=UDim2.fromOffset(15,88)
+    iSub.Font=Enum.Font.FredokaOne; iSub.Text="ANTI-GUARD • LOADING"; iSub.TextSize=10
+    iSub.TextColor3=Color3.fromRGB(150,150,160); iSub.ZIndex=102; iSub.Parent=iCard
 
-local iBarBg=Instance.new("Frame"); iBarBg.Size=UDim2.new(0.72,0,0,4); iBarBg.Position=UDim2.new(0.14,0,1,-25)
-iBarBg.BackgroundColor3=Color3.fromRGB(40,40,48); iBarBg.BorderSizePixel=0; iBarBg.ZIndex=102; iBarBg.Parent=iCard
-Instance.new("UICorner",iBarBg).CornerRadius=UDim.new(1,0)
-local iBarFill=Instance.new("Frame"); iBarFill.Size=UDim2.new(0,0,1,0)
-iBarFill.BackgroundColor3=Color3.fromRGB(255,255,255); iBarFill.BorderSizePixel=0; iBarFill.ZIndex=103; iBarFill.Parent=iBarBg
-Instance.new("UICorner",iBarFill).CornerRadius=UDim.new(1,0)
+    local iBarBg=Instance.new("Frame"); iBarBg.Size=UDim2.new(0.72,0,0,4); iBarBg.Position=UDim2.new(0.14,0,1,-25)
+    iBarBg.BackgroundColor3=Color3.fromRGB(40,40,48); iBarBg.BorderSizePixel=0; iBarBg.ZIndex=102; iBarBg.Parent=iCard
+    Instance.new("UICorner",iBarBg).CornerRadius=UDim.new(1,0)
+    local iBarFill=Instance.new("Frame"); iBarFill.Size=UDim2.new(0,0,1,0)
+    iBarFill.BackgroundColor3=Color3.fromRGB(255,255,255); iBarFill.BorderSizePixel=0; iBarFill.ZIndex=103; iBarFill.Parent=iBarBg
+    Instance.new("UICorner",iBarFill).CornerRadius=UDim.new(1,0)
 
-local iScale=Instance.new("UIScale"); iScale.Scale=0.82; iScale.Parent=iCard
-iCard.BackgroundTransparency=1; iTitleLbl.TextTransparency=1; iSub.TextTransparency=1
-iBarBg.BackgroundTransparency=1; iBarFill.BackgroundTransparency=1
+    local iScale=Instance.new("UIScale"); iScale.Scale=0.82; iScale.Parent=iCard
+    iCard.BackgroundTransparency=1; iTitleLbl.TextTransparency=1; iSub.TextTransparency=1
+    iBarBg.BackgroundTransparency=1; iBarFill.BackgroundTransparency=1
 
-tw(iScale,TweenInfo.new(0.35,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
-tw(iCard,TweenInfo.new(0.28),{BackgroundTransparency=0.03})
-tw(iTitleLbl,TweenInfo.new(0.25),{TextTransparency=0})
-tw(iSub,TweenInfo.new(0.25),{TextTransparency=0})
-tw(iBarBg,TweenInfo.new(0.25),{BackgroundTransparency=0})
-tw(iBarFill,TweenInfo.new(0.25),{BackgroundTransparency=0})
-tw(iBarFill,TweenInfo.new(2.6,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut),{Size=UDim2.new(1,0,1,0)})
+    tw(iScale,TweenInfo.new(0.35,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
+    tw(iCard,TweenInfo.new(0.28),{BackgroundTransparency=0.03})
+    tw(iTitleLbl,TweenInfo.new(0.25),{TextTransparency=0})
+    tw(iSub,TweenInfo.new(0.25),{TextTransparency=0})
+    tw(iBarBg,TweenInfo.new(0.25),{BackgroundTransparency=0})
+    tw(iBarFill,TweenInfo.new(0.25),{BackgroundTransparency=0})
+    tw(iBarFill,TweenInfo.new(2.6,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut),{Size=UDim2.new(1,0,1,0)})
 
-task.wait(3.35)
-iSub.Text="ANTI-GUARD • READY"
-task.wait(1.0)
+    task.wait(3.35)
+    iSub.Text="ANTI-GUARD • READY"
+    task.wait(1.0)
 
-main.Visible=true; shadow.Visible=true; playClick(1.35,0.24)
-mainUIScale.Scale=0.78; shadowUIScale.Scale=0.78
-main.BackgroundTransparency=0; shadow.BackgroundTransparency=0.45
-tw(mainUIScale,TweenInfo.new(0.52,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
-tw(shadowUIScale,TweenInfo.new(0.52,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
+    main.Visible=true; shadow.Visible=true; playClick(1.35,0.24)
+    mainUIScale.Scale=0.78; shadowUIScale.Scale=0.78
+    main.BackgroundTransparency=0; shadow.BackgroundTransparency=0.45
+    tw(mainUIScale,TweenInfo.new(0.52,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
+    tw(shadowUIScale,TweenInfo.new(0.52,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
 
-task.spawn(function()
-    task.wait(0.05)
-    tw(iScale,TweenInfo.new(0.35,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Scale=0.9})
-    tw(intro,TweenInfo.new(0.38,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{BackgroundTransparency=1})
-    tw(iCard,TweenInfo.new(0.32,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{BackgroundTransparency=1})
-    tw(iTitleLbl,TweenInfo.new(0.25),{TextTransparency=1})
-    tw(iSub,TweenInfo.new(0.25),{TextTransparency=1})
-    task.wait(0.4); intro:Destroy()
-    dragHandle.Visible=true; resizeHandle.Visible=true
-end)
+    task.spawn(function()
+        task.wait(0.05)
+        tw(iScale,TweenInfo.new(0.35,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Scale=0.9})
+        tw(intro,TweenInfo.new(0.38,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{BackgroundTransparency=1})
+        tw(iCard,TweenInfo.new(0.32,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{BackgroundTransparency=1})
+        tw(iTitleLbl,TweenInfo.new(0.25),{TextTransparency=1})
+        tw(iSub,TweenInfo.new(0.25),{TextTransparency=1})
+        task.wait(0.4); intro:Destroy()
+        dragHandle.Visible=true; resizeHandle.Visible=true
+    end)
+end
 
+runIntro()
 refreshTabs()
 
 -- ======================================================
@@ -2110,9 +2373,10 @@ end)
 task.delay(1, function()
     log("=== VIREX ANTI-GUARD v3 (merged) ===", LOG_OK)
     log("loadstring: "..(HAS_LOADSTRING and "available (F9 = reload)" or "UNAVAILABLE"), HAS_LOADSTRING and LOG_OK or LOG_WARN)
+    log("fireproximityprompt: "..(type(fireproximityprompt)=="function" and "available" or "MISSING — switch Carry Method to REMOTE/BOTH"),
+        type(fireproximityprompt)=="function" and LOG_OK or LOG_ERR)
     log("Carry remote: "..(CarryRemote and CarryRemote:GetFullName() or "NOT FOUND"), CarryRemote and LOG_OK or LOG_ERR)
     log("Drop  remote: "..(DropRemote  and DropRemote:GetFullName()  or "NOT FOUND"), DropRemote  and LOG_INFO or LOG_WARN)
-    log("Steal engine ready — mode="..Engine:GetMode(), LOG_INFO)
-    log("Config > Scan Eggs to populate the rarity filter", LOG_INFO)
-    log("Scripts > INSTANT STEAL to start farming", LOG_WARN)
+    log("Steal engine ready — mode="..Engine:GetMode().." carry="..Engine:GetSteal():GetConfig().CarryMethod, LOG_INFO)
+    log("Config > Scan Eggs, then Run ONE steal cycle", LOG_INFO)
 end)
