@@ -1,0 +1,5 @@
+# Termux / editor cruft
+*.swp
+*.bak
+*.tmp
+.DS_Store
