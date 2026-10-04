@@ -70,11 +70,38 @@ The `AUTO RUN BASE` card can also be toggled on its own to trigger a return with
 | Arrive distance (studs) | 30 | 4–50 |
 | Walk timeout (sec) | 90 | 10–300 |
 | Re-fire egg prompt on return | ON | on / off |
+| Ignore big-egg slowdown | ON | on / off |
+| Velocity boost (detectable) | OFF | on / off |
+
+**Big eggs are part of this flow.** The script re-fires the egg prompt on the way
+out, which is what picks the egg up, and you carry it home. Most games of this type
+halve `WalkSpeed` while a big egg is carried. *Ignore big-egg slowdown* (on by
+default) detects that and forces 2× the configured speed instead. Run
+**🥚 Check carry status + speed** to see what it's reading off your character.
+
+**Velocity boost** pushes `AssemblyLinearVelocity` toward the base every frame,
+which bypasses any `WalkSpeed` clamp the game applies. It's the most effective
+option and the most detectable — off by default for that reason.
+
+### Why it sometimes walks when you expected a TP
+
+If the server rejects the snap, the script logs `TP rejected — walking instead
+(setting unchanged, next run retries TP)` and walks **for that run only**. Your
+TELEPORT selection stays selected and is retried next time, so a temporary block
+doesn't permanently downgrade the mode.
+
+While walking it also detects being stuck (under 2 studs moved per 1.5s, three
+times running) and attempts a TP as recovery before giving up on the walk.
 
 ### Debug
 - **▶ Trigger Auto Run NOW** — run a return leg immediately
 - **⚡ Test TP to base only** — isolates whether TP works, nothing else running
 - **📍 Scan spawn locations** — dump every `SpawnLocation` + your position
+- **🥚 Check carry status + speed** — carrying state, real vs. configured speed, distance to base
+
+While walking, the console logs progress every 2s (`N studs to go • speed X •
+carrying egg`) plus any stuck detections, so "why is it slow" is always
+answerable from the log.
 
 ### Look
 GUI size (small/medium/large) and 5 themes.

@@ -568,6 +568,36 @@ local RUN_SPEED   = 300
 local ARRIVE_DIST = 30
 local WALK_TIMEOUT = 90
 local GRAB_EGG    = true
+local VELOCITY_BOOST = false  -- opt-in; bypasses WalkSpeed clamps (detectable)
+local BOOST_SPEED = 250
+local BOOST_UNTIL = 0
+local IGNORE_CARRY_SLOW = true  -- compensate the big-egg WalkSpeed penalty
+
+-- Games commonly halve WalkSpeed while you carry a "Big Egg". Read that off
+-- the character so we can log it and compensate.
+local function isCarryingEgg()
+    local char = Player.Character
+    if not char then return false end
+    for _, key in ipairs({"CarryingEgg","CarryingEggUid","Carrying","HasEgg","EggUID","EggUid"}) do
+        local v = char:GetAttribute(key)
+        if v ~= nil and v ~= false and v ~= "" then return true end
+    end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and string.find(string.lower(tool.Name), "egg", 1, true) then return true end
+    local backpack = Player:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _, obj in ipairs(backpack:GetChildren()) do
+            if obj:IsA("Tool") and string.find(string.lower(obj.Name), "egg", 1, true) then return true end
+        end
+    end
+    return false
+end
+
+-- What we actually force onto the humanoid each frame.
+local function effectiveSpeed()
+    if IGNORE_CARRY_SLOW and isCarryingEgg() then return RUN_SPEED * 2 end
+    return RUN_SPEED
+end
 
 local AutoRunEnabled = false
 local AutoRunning    = false
@@ -593,7 +623,14 @@ local function startSpeedForce()
             _speedConn = nil; return
         end
         local hum = getHumanoid()
-        if hum and hum.Health > 0 then pcall(function() hum.WalkSpeed = RUN_SPEED end) end
+        if hum and hum.Health > 0 then
+            local want = effectiveSpeed()
+            -- Only write when it differs, so we don't spam the property and
+            -- give the game's own WalkSpeed watcher nothing to fight over.
+            if math.abs(hum.WalkSpeed - want) > 0.5 then
+                pcall(function() hum.WalkSpeed = want end)
+            end
+        end
     end)
 end
 
@@ -653,6 +690,7 @@ end
 
 local function stopAutoRun(reason)
     AutoRunning = false
+    BOOST_UNTIL  = 0
     stopSpeedForce()
     log("AutoRun: STOPPED — "..(reason or "done"), LOG_WARN)
     if AutoRunEnabled then setArVisual("on","ON  •  waits for egg interact")
@@ -666,6 +704,7 @@ local function startAutoRun()
     -- here or the loop exits instantly.
     AutoRunEnabled = true
     AutoRunning = true
+    BOOST_UNTIL = 0
     setArVisual("running", RETURN_TP and "Teleporting to base..." or "Running to base...")
 
     task.spawn(function()
@@ -682,20 +721,31 @@ local function startAutoRun()
             task.wait(0.25)
         end
 
-        if RETURN_TP then
-            local ok = tpTo(target, TP_OFFSET)
-            if ok then
+        -- Per-run flag. Deliberately NOT the RETURN_TP setting: mutating that
+        -- permanently downgraded every future run while the Config buttons
+        -- kept showing TELEPORT selected, so the UI lied about the mode.
+        local useTP = RETURN_TP
+        local arrived = false
+
+        if useTP then
+            if tpTo(target, TP_OFFSET) then
                 log("AutoRun: ARRIVED at base (TP)", LOG_OK)
+                arrived = true
             else
-                log("AutoRun: TP was rejected / rubber-banded — falling back to walking", LOG_WARN)
-                setArVisual("running","TP failed, walking...")
-                RETURN_TP = false
+                log("AutoRun: TP rejected — walking instead (setting unchanged, next run retries TP)", LOG_WARN)
+                setArVisual("running","TP blocked, walking...")
+                useTP = false
             end
         end
 
-        if not RETURN_TP then
+        if not arrived then
             startSpeedForce()
             local startTime = tick()
+            local lastPos   = getRoot() and getRoot().Position or Vector3.zero
+            local lastCheck = startTime
+            local stuckCount = 0
+            local lastLog    = 0
+
             while AutoRunning and AutoRunEnabled do
                 local hum = getHumanoid()
                 local root = getRoot()
@@ -707,18 +757,75 @@ local function startAutoRun()
                     stopSpeedForce(); log("AutoRun: died", LOG_ERR)
                     stopAutoRun("dead"); return
                 end
-                local dist = (root.Position - target).Magnitude
+
+                local pos  = root.Position
+                local dist = (pos - target).Magnitude
+
                 if dist <= ARRIVE_DIST then
                     stopSpeedForce(); log("AutoRun: ARRIVED at base (walk)", LOG_OK); break
                 end
-                if tick() - startTime > WALK_TIMEOUT then
+
+                local elapsed = tick() - startTime
+                if elapsed > WALK_TIMEOUT then
                     stopSpeedForce()
-                    log("AutoRun: timeout after "..math.floor(tick()-startTime).."s", LOG_WARN)
+                    log("AutoRun: timeout after "..math.floor(elapsed).."s — still "..math.floor(dist).." studs out", LOG_WARN)
                     stopAutoRun("timeout"); return
                 end
+
                 stripPushBack()
-                pcall(function() hum.WalkSpeed = RUN_SPEED; hum:MoveTo(target) end)
+                pcall(function() hum.WalkSpeed = effectiveSpeed() ; hum:MoveTo(target) end)
+
+                -- Velocity boost: bypasses any WalkSpeed clamp the game
+                -- applies. Detectable — opt-in only.
+                if VELOCITY_BOOST and not BOOST_UNTIL then
+                    BOOST_UNTIL = tick() + 0.25
+                    pcall(function()
+                        local dir = (target - pos)
+                        if dir.Magnitude > 0 then
+                            root.AssemblyLinearVelocity = dir.Unit * BOOST_SPEED
+                        end
+                    end)
+                end
+
                 task.wait(0.1)
+
+                -- ── progress / stuck detection ──
+                local now = tick()
+                if now - lastCheck >= 1.5 then
+                    local moved = (getRoot() and (getRoot().Position - lastPos).Magnitude) or 0
+                    if moved < 2 then
+                        stuckCount += 1
+                        log(string.format("AutoRun: stuck %d/3 — moved %.1f studs in 1.5s, %d to go",
+                            stuckCount, moved, math.floor(dist)), LOG_WARN)
+                        if stuckCount >= 3 then
+                            stopSpeedForce()
+                            log("AutoRun: pathing blocked — trying TP instead", LOG_WARN)
+                            if tpTo(target, TP_OFFSET) then
+                                log("AutoRun: ARRIVED at base (TP, stuck-recovery)", LOG_OK)
+                                stopAutoRun("done (TP recovery)"); return
+                            end
+                            log("AutoRun: TP also rejected while stuck", LOG_ERR)
+                            lastPos   = getRoot() and getRoot().Position or lastPos
+                            stuckCount = 0
+                            lastCheck  = now
+                        end
+                    else
+                        if stuckCount > 0 then
+                            log("AutoRun: moving again ("..string.format("%.0f", moved).." studs / 1.5s)", LOG_OK)
+                            stuckCount = 0
+                        end
+                    end
+                    lastPos   = getRoot() and getRoot().Position or lastPos
+                    lastCheck = now
+                end
+
+                -- periodic progress ping so "why is it slow" is answerable
+                if now - lastLog >= 2 then
+                    lastLog = now
+                    log(string.format("AutoRun: %d studs to go • speed %d (eff %d)%s",
+                        math.floor(dist), hum.WalkSpeed, effectiveSpeed(),
+                        isCarryingEgg() and " • carrying egg" or ""), LOG_INFO)
+                end
             end
         end
 
@@ -888,6 +995,16 @@ makeStepper("ARRIVE DISTANCE  (studs)", ARRIVE_DIST, 4, 50, 2, function(v) retur
 makeStepper("WALK TIMEOUT  (sec)", WALK_TIMEOUT, 10, 300, 10, function(v) return v.." s" end,
     function(v) WALK_TIMEOUT = v end)
 makeToggle("RE-FIRE EGG PROMPT ON RETURN", GRAB_EGG, function(on) GRAB_EGG = on end)
+makeToggle("IGNORE BIG-EGG SLOWDOWN", IGNORE_CARRY_SLOW, function(on)
+    IGNORE_CARRY_SLOW = on
+    log(on and "Big-egg WalkSpeed penalty will be overridden (2x speed while carrying)"
+        or "Big-egg WalkSpeed penalty left alone", LOG_INFO)
+end)
+makeToggle("VELOCITY BOOST  (detectable)", VELOCITY_BOOST, function(on)
+    VELOCITY_BOOST = on
+    log(on and "Velocity boost ON — pushes AssemblyLinearVelocity toward base"
+        or "Velocity boost off", on and LOG_WARN or LOG_INFO)
+end)
 
 -- ── DEBUG ────────────────────────────────────────────
 cfgLabel("DEBUG")
@@ -921,6 +1038,35 @@ spawnScanBtn.Activated:Connect(function()
     log("=== FOUND "..count.." SpawnLocation(s) ===", count>0 and LOG_OK or LOG_ERR)
     local root = getRoot()
     if root then log("Your position = "..tostring(root.Position), LOG_INFO) end
+end)
+
+local carryBtn = cfgBtn("🥚  Check carry status + speed")
+carryBtn.Activated:Connect(function()
+    playClick()
+    local hum = getHumanoid()
+    local root = getRoot()
+    log("=== CARRY / SPEED CHECK ===", LOG_INFO)
+    log("WalkSpeed now = "..(hum and hum.WalkSpeed or "?"), LOG_INFO)
+    log("Original walk speed saved = ".._originalWalkSpeed, LOG_INFO)
+    log("Configured RUN SPEED = "..RUN_SPEED, LOG_INFO)
+    log("Effective speed (after carry bonus) = "..effectiveSpeed(), LOG_INFO)
+    log("Carrying an egg? "..tostring(isCarryingEgg()), isCarryingEgg() and LOG_WARN or LOG_OK)
+    local char = Player.Character
+    if char then
+        local tool = char:FindFirstChildOfClass("Tool")
+        log("Equipped tool = "..(tool and tool.Name or "none"), LOG_INFO)
+        local keys = {}
+        for _, k in ipairs({"CarryingEgg","CarryingEggUid","Carrying","HasEgg","EggUID","EggUid","Rarity"}) do
+            local v = char:GetAttribute(k)
+            if v ~= nil then table.insert(keys, k.."="..tostring(v)) end
+        end
+        log("Relevant attributes: "..(#keys > 0 and table.concat(keys, ", ") or "none found"), LOG_INFO)
+    end
+    local base = getBasePosition()
+    if root then
+        log("Distance to base = "..math.floor((root.Position - base).Magnitude).." studs", LOG_INFO)
+    end
+    log("Return method = "..(RETURN_TP and "TELEPORT" or "WALK"), LOG_INFO)
 end)
 
 -- ── LOOK ─────────────────────────────────────────────
