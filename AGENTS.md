@@ -29,8 +29,39 @@ global.
 
 ## Project
 
-`virexhub.lua` is a single-file Roblox exploit for **Steal An Egg** (placeId
-107778070777162): Anti Hit and Auto Run Base, zero-config.
+A Roblox script for **Steal An Egg** (placeId 107778070777162): Anti Hit, Auto
+Run Base and Auto Fetch, zero-config.
+
+`virexhub.lua` is a 94-line loader. Everything else lives in `src/` and is
+fetched over HTTP at run time, so a fix reaches users without re-pasting:
+
+```
+virexhub.lua        loader: fetches and wires, in dependency order
+src/init.lua        wire(deps) + boot(); fetched last
+src/core/log.lua    logging, self-test scoring, clipboard export
+src/core/util.lua   character lookups, pushback stripper
+src/core/transport.lua  base detection, flowTp/hopTp/glideTo, Auto Run
+src/core/antihit.lua    fast click, guard watcher, dodge
+src/core/eggs.lua       rarity index, egg discovery, Auto Fetch
+src/core/selftest.lua   runtime probes producing the PASS/FAIL report
+src/ui/kit.lua          window, theme, widgets
+src/tabs/*.lua          Features / Logs / Config
+```
+
+Two rules the split imposes:
+
+- **Load order is dependency order.** `log` first (every module logs during
+  load and `log.write` buffers until the UI binds a page), `transport` before
+  `antihit` (its prompt handler calls `transport.startAutoRun`), `init` last.
+  `init.lua` exposes `wire(deps)` rather than injecting at its own top level,
+  because none of its dependencies exist yet when it is fetched.
+- **Push every module before changing the loader.** If the loader names a file
+  that is not on `origin master` yet, every user's script breaks on load.
+
+Cross-module members are injected, not required, so any module can be fetched
+and read on its own. When adding a module, audit the references: a `M.x.y` that
+does not exist on the target is a nil-index on someone's character at runtime,
+not a load error.
 
 Public loader:
 
@@ -39,7 +70,21 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/dertmo01/virexhub/mas
 ```
 
 Because this file is fetched raw over HTTP, **any change to it changes the live
-loader immediately**. That is why the push rule above is absolute.
+loader immediately**, and so does any change under `src/`, since the loader
+fetches those at run time too. That is why the push rule above is absolute.
+
+After pushing a structural change, confirm every path the loader fetches is
+actually reachable — a 200 from raw.githubusercontent.com, per file:
+
+```bash
+for p in virexhub.lua src/core/log.lua src/core/util.lua \
+         src/core/transport.lua src/core/antihit.lua src/core/eggs.lua \
+         src/core/selftest.lua src/ui/kit.lua src/tabs/features.lua \
+         src/tabs/logs.lua src/tabs/config.lua src/init.lua; do
+  printf "%-28s %s\n" "$p" "$(curl -s -o /dev/null -w '%{http_code}' \
+    "https://raw.githubusercontent.com/dertmo01/virexhub/master/$p")"
+done
+```
 
 ## Workflow the user expects
 
@@ -71,6 +116,12 @@ while long jumps were being rejected. It reported confusing results and hid the
 actual bug. Probe over a distance the server actually distinguishes.
 
 Never gate a fix on a check that cannot pass. See [[log-export-honesty]].
+
+`flowTp()` had the same class of bug in its reporting: it logged
+`dest.Magnitude`, which is world-coordinate magnitude, not distance travelled.
+That produced lines like "755 studs in 0.3s" that are arithmetically impossible
+at the speeds involved, and would have sent the next round of debugging after a
+phantom. Log `(dest - startPosition).Magnitude`.
 
 ## Reference material
 

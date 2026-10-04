@@ -17,31 +17,32 @@
 --   * is diagnostic-only and never demotes the chosen transport;
 --   * runs at 14s, after the post-spawn warmup window, because during warmup
 --     every method fails including ones that work later.
+local Players = game:GetService("Players")
+local Player  = Players.LocalPlayer
+
 local M = {}
 M.log, M.util, M.transport, M.antihit, M.eggs = nil, nil, nil, nil, nil
 -- set by init: whether loadstring exists, i.e. whether F9 can hot-reload
 M.hasLoadstring = false
 local function log(m,c) return M.log.write(m,c) end
 
+-- Scoring lives in log.lua, not here. This used to keep its own counters while
+-- the export header read log.test's, so COPY ALL reported "0 PASS / 0 FAIL"
+-- no matter how many checks had run. One table, one source of truth.
 function M.st(ok, name, detail, level)
-    local tag, col
-    if level == "info" then
-        tag = "INFO"; col = M.log.INFO
-    elseif level == "warn" or level == true then
-        tag = "WARN"; col = M.log.WARN; SELFTEST.warn += 1
-    elseif ok then
-        tag = "PASS"; col = M.log.OK;   SELFTEST.pass += 1
-    else
-        tag = "FAIL"; col = M.log.ERR;  SELFTEST.fail += 1
-    end
-    local line = "[SELF-TEST] "..tag.."  "..name..(detail and ("  —  "..detail) or "")
-    table.insert(SELFTEST.lines, line)
-    log(line, col)
-    return ok
+    return M.log.check(ok, name, detail, level)
+end
+
+function M.resetTest()
+    M.log.resetTest()
+end
+
+function M.score()
+    return M.log.test.pass, M.log.test.fail, M.log.test.warn
 end
 
 function M.runStaticSelfTest()
-    SELFTEST.pass=0; SELFTEST.fail=0; SELFTEST.warn=0; SELFTEST.lines={}
+    M.log.test.pass=0; M.log.test.fail=0; M.log.test.warn=0; M.log.test.lines={}
     log("────────── SELF-TEST (static) ──────────", M.log.TEST)
 
     -- environment
@@ -52,7 +53,7 @@ function M.runStaticSelfTest()
     M.st(type(setclipboard)=="function", "setclipboard available", nil, "info")
 
     -- character
-    local hum, root = getHumanoid(), M.util.root()
+    local hum, root = M.util.humanoid(), M.util.root()
     M.st(hum ~= nil, "Humanoid present")
     M.st(root ~= nil, "HumanoidRootPart present")
     if hum then
@@ -74,7 +75,7 @@ function M.runStaticSelfTest()
     end
 
     -- guard GUI -- the single most important unknown
-    local dhe = getDropHeldEgg()
+    local dhe = M.antihit.getDropHeldEgg()
     M.st(dhe ~= nil, "DropHeldEgg found in PlayerGui",
         dhe and (dhe.ClassName.." Enabled="..tostring(dhe.Enabled)) or "MISSING — guard watch cannot fire, prompt trigger is the only path")
     if dhe then
@@ -113,17 +114,17 @@ function M.runStaticSelfTest()
     end
 
     -- live connection state
-    M.st(FC.shown ~= nil, "Fast click listener connected", nil, "info")
-    M.st(_guardThread ~= nil, "Guard watcher thread running", nil, "info")
-    if AntiHitEnabled then
+    M.st(M.antihit.fastClickShown ~= nil, "Fast click listener connected", nil, "info")
+    M.st(M.antihit.watching(), "Guard watcher thread running", nil, "info")
+    if M.antihit.enabled then
         M.st(true, "ANTI HIT toggle is ON")
     else
         M.st(false, "ANTI HIT toggle is OFF", "dodges will not run until you enable it", true)
     end
 
     -- carry detection
-    local carrying = isCarryingEgg()
-    log("[SELF-TEST] INFO  isCarryingEgg() = "..tostring(carrying).."  effectiveSpeed="..effectiveSpeed().." (M.transport.runSpeed="..M.transport.runSpeed..")", M.log.INFO)
+    local carrying = M.transport.isCarryingEgg()
+    log("[SELF-TEST] INFO  M.transport.isCarryingEgg() = "..tostring(carrying).."  effectiveSpeed="..effectiveSpeed().." (M.transport.runSpeed="..M.transport.runSpeed..")", M.log.INFO)
 
     -- waypoint sanity -- hardcoded to one map, worth validating
     local badWps = 0
@@ -134,9 +135,9 @@ function M.runStaticSelfTest()
 
     M.st(M.transport.method ~= nil, "Return method set", M.transport.method)
 
-    log(string.format("[SELF-TEST] SUMMARY  %d PASS / %d FAIL / %d WARN", SELFTEST.pass, SELFTEST.fail, SELFTEST.warn),
-        SELFTEST.fail == 0 and M.log.OK or M.log.ERR)
-    return SELFTEST.fail
+    log(string.format("[SELF-TEST] SUMMARY  %d PASS / %d FAIL / %d WARN", M.log.test.pass, M.log.test.fail, M.log.test.warn),
+        M.log.test.fail == 0 and M.log.OK or M.log.ERR)
+    return M.log.test.fail
 end
 
 function M.runMovementSelfTest()
@@ -201,7 +202,7 @@ function M.runMovementSelfTest()
     -- stranding us. tpTo remains available as a self-verifying chain link.
 
     -- 3. glide is no longer expected to work here; keep it informational only
-    local glideOK = glideTo(origin, 0)
+    local glideOK = M.transport.glideTo(origin, 0)
     M.st(glideOK, "BodyVelocity glide holds (informational)",
         glideOK and "glide viable" or "glide does not stick on this server", "info")
 
@@ -225,7 +226,7 @@ function M.runMovementSelfTest()
     M.st(drift >= 0 and drift <= 20, "Returned to origin", "drift="..math.floor(drift).." studs")
 
     -- can we actually move under our own power?
-    local hum2 = getHumanoid()
+    local hum2 = M.util.humanoid()
     if hum2 then
         M.transport.startSpeedForce()
         task.wait(0.3)
@@ -236,17 +237,17 @@ function M.runMovementSelfTest()
         -- overwritten immediately, so this check can never pass. Reporting it as
         -- FAIL every run trains the user to ignore FAIL, and with HOP verified
         -- we barely walk at all, so it costs nothing. State it once, plainly.
-        local clamped = math.abs(forced - effectiveSpeed()) >= 1
+        local clamped = math.abs(forced - M.transport.effectiveSpeed()) >= 1
         M.st(true, clamped and "WalkSpeed is server-clamped" or "WalkSpeed force applied",
-            clamped and ("game caps it at "..math.floor(forced)..", our target of "..math.floor(effectiveSpeed()).." is discarded - irrelevant while HOP works")
+            clamped and ("game caps it at "..math.floor(forced)..", our target of "..math.floor(M.transport.effectiveSpeed()).." is discarded - irrelevant while HOP works")
                      or ("forced="..math.floor(forced)),
             clamped)
-        M.st(math.abs(restored - _originalWalkSpeed) < 1, "Speed restored on stop", "restored="..math.floor(restored), "info")
+        M.st(math.abs(restored - M.transport.originalWalkSpeed) < 1, "Speed restored on stop", "restored="..math.floor(restored), "info")
     end
 
     -- 5. is the egg prompt actually instant?
-    if FC.shown ~= nil then
-        scanAllPrompts()
+    if M.antihit.fastClickShown ~= nil then
+        M.antihit.scanAllPrompts()
         local z = 0
         for _, d in ipairs(workspace:GetDescendants()) do
             if d:IsA("ProximityPrompt") and d.HoldDuration == 0 then z += 1 end
@@ -254,9 +255,9 @@ function M.runMovementSelfTest()
         M.st(z > 0, "Egg prompts are instant", z.." prompts with HoldDuration=0", "info")
     end
 
-    log(string.format("[SELF-TEST] MOVEMENT DONE  %d PASS / %d FAIL / %d WARN", SELFTEST.pass, SELFTEST.fail, SELFTEST.warn),
-        SELFTEST.fail == 0 and M.log.OK or M.log.ERR)
-    if SELFTEST.fail > 0 then
+    log(string.format("[SELF-TEST] MOVEMENT DONE  %d PASS / %d FAIL / %d WARN", M.log.test.pass, M.log.test.fail, M.log.test.warn),
+        M.log.test.fail == 0 and M.log.OK or M.log.ERR)
+    if M.log.test.fail > 0 then
         log("Movement FAILs above mean the server is rejecting client position writes for that method.", M.log.ERR)
     end
     return probeFlowOK

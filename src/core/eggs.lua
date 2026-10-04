@@ -143,7 +143,7 @@ function M.findBest(maxDistance)
         if slot:IsA("Model") and not M.isPlayerModel(slot)
            and not string.find(slot.Name, "FirstAreaEgg", 1, true)
            and slot:FindFirstChildWhichIsA("BasePart") then
-            local data = classifyEgg(slot)
+            local data = M.classify(slot)
             if data and data.Rarity and M.wanted[data.Rarity] then
                 local part = slot:FindFirstChildWhichIsA("BasePart")
                 local dist = part and (part.Position - root.Position).Magnitude or math.huge

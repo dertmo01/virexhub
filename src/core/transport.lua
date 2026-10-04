@@ -39,10 +39,6 @@ M.ignoreCarrySlow = true
 M.boost     = false
 M.baseOverride = nil
 
-M.FLOW_SPEED, M.FLOW_MIN, M.FLOW_MAX = 300, 40, 600
-M.FLOW_ARRIVE, M.FLOW_TIMEOUT, M.FLOW_CLEAN = 3, 25, 45
-M.HOP_DISTANCE, M.HOP_TOL, M.HOP_MAX, M.HOP_STALL = 35, 14, 120, 3
-M.HOP_MIN, M.HOP_MAXWAIT, M.HOP_BACKOFF, M.HOP_RELAX = 0.05, 0.55, 1.6, 0.94
 
 
 M.onState = nil                  -- UI hook: function(state, text)
@@ -108,13 +104,48 @@ end
 -- state that was top-level locals in the single-file version
 local BOOST_UNTIL = 0
 local _speedConn = nil
-local _originalWalkSpeed = 150
+-- Exposed so the self-test can verify a temporary speed override is actually put
+-- back. It was a monolith global the test read directly; after the split the test
+-- has to be handed it explicitly or the check silently compares against nil.
+M.originalWalkSpeed = 150
 M.autoEnabled = true          -- the Features tab toggle
 M.grabEgg     = true              -- re-fire the egg prompt on the way out
 M.walkTimeout = 90
 local CurrentEggPrompt = nil      -- set by antihit when it sees one fire
 
 M.running = false   -- a walk is in progress; antihit waits on this
+
+-- ── tuning constants ─────────────────────────────────────────────
+-- Values carried over verbatim from the monolith. These are not style choices:
+-- each one is the boundary of something the server actually enforces, or the
+-- value that made a method work. FLOW_SPEED_MIN is how slow the adaptive loop
+-- is allowed to crawl before it gives up; HOP_DISTANCE 35 is comfortably inside
+-- the accepted range while 90+ is corrected.
+local FLOW_SPEED      = 300  -- studs/sec we aim for
+local FLOW_SPEED_MIN  = 40   -- slowest we will crawl to stay under the limiter
+local FLOW_SPEED_MAX  = 600  -- fastest we will ever try
+local FLOW_ARRIVE     = 3    -- within this many studs, land it exactly
+local FLOW_TIMEOUT    = 25   -- give up rather than walk forever
+local FLOW_SLOW_STREAK = 45  -- clean frames needed before speeding back up
+
+local HOP_DISTANCE   = 35    -- studs per hop, comfortably inside the accepted range
+local HOP_MAX        = 120   -- 120 * 35 = 4200 studs of reach
+local HOP_TOLERANCE  = 14    -- how far off a hop may land before we call it rejected
+local HOP_STALL_LIMIT = 3    -- consecutive non-progressing hops before giving up
+local HOP_SETTLE_MIN = 0.05  -- fastest we dare go
+local HOP_SETTLE_MAX = 0.55  -- slowest we back off to
+local HOP_BACKOFF    = 1.6   -- multiplier applied on a corrected hop
+local HOP_RELAX      = 0.94  -- multiplier applied on a clean hop
+
+local GLIDE_OFFSET  = 80      -- cruise height above the destination
+local GLIDE_ARRIVE  = 3       -- snap inside this radius
+local GLIDE_P       = 5000
+local GLIDE_GYRO_P  = 50000
+local GLIDE_GYRO_D  = 2000
+local GLIDE_TIMEOUT = 12
+
+local BOOST_SPEED = 250
+
 M.prompt = nil                   -- last egg prompt the client fired
 function M.setAutoEnabled(v) M.autoEnabled = v end
 function M.setGrabEgg(v)     M.grabEgg = v end
@@ -268,6 +299,12 @@ function M.flowTp(position, offsetY, label)
     local root = getRoot()
     if not root then return false, "no root" end
 
+    -- Captured before moving: the distance actually travelled is measured from
+    -- here. Logging dest.Magnitude reports world-coordinate magnitude instead,
+    -- which is why earlier exports claimed "755 studs in 0.3s" -- arithmetically
+    -- impossible, and it would send the next round of debugging after a phantom.
+    local startPos = root.Position
+
     local speed    = FLOW_SPEED
     local clean    = 0
     local t0       = os.clock()
@@ -351,7 +388,7 @@ function M.flowTp(position, offsetY, label)
     local final = (r.Position - dest).Magnitude
     if final <= FLOW_ARRIVE then
         return true, string.format("%s: %.0f studs in %.1fs (%d frames%s)",
-            label or "flow", dest.Magnitude, os.clock() - t0, frames,
+            label or "flow", (dest - startPos).Magnitude, os.clock() - t0, frames,
             slowest < FLOW_SPEED - 1 and (", backed off to "..math.floor(slowest)) or "")
     end
     return false, string.format("%s: gave up %d studs short after %.1fs", label or "flow", math.floor(final), os.clock() - t0)
@@ -542,7 +579,7 @@ end
 function M.stopSpeedForce()
     if _speedConn then _speedConn:Disconnect(); _speedConn = nil end
     local hum = getHumanoid()
-    if hum then pcall(function() hum.WalkSpeed = _originalWalkSpeed end) end
+    if hum then pcall(function() hum.WalkSpeed = M.originalWalkSpeed end) end
 end
 
 function M.stopAutoRun(reason)

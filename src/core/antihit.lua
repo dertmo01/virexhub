@@ -24,7 +24,7 @@ local function getHumanoid() return M.util.humanoid() end
 
 M.enabled  = true
 M.running  = false
-M.safeZone = false
+M.safeZone = false   -- Config toggle: safe zone vs waypoint route
 
 -- The reference's waypoint route. Camera-locked, then restored.
 M.ROUTE = {
@@ -33,7 +33,10 @@ M.ROUTE = {
     Vector3.new(516,72,-406), Vector3.new(500,72,-394), Vector3.new(516,72,-366),
 }
 M.SAFE_ZONE = Vector3.new(550, 70, -431)
-M.ANTI_HIT_STEP = 0.045
+-- 0.005s per waypoint: the dodge has to outrun the guard's hit, and this was
+-- measured against the reference's route timing, not guessed.
+M.ANTI_HIT_STEP = 0.005
+local SAFE_WAIT  = 1    -- how long to sit in the safe zone before heading back
 
 local FC = {shown=nil, beat=nil, desc=nil, n=0}
 local guardThread, guardLast = nil, false
@@ -97,7 +100,7 @@ function M.beginDodge(reason)
                     r.AssemblyAngularVelocity = Vector3.zero
                 end)
             end
-            stripPushBack()
+            M.util.stripPushBack()
             local h = getHumanoid()
             if h then pcall(function() h.WalkSpeed = savedSpeed end) end
             unlockCamera()
@@ -105,7 +108,7 @@ function M.beginDodge(reason)
             log("AntiHit: "..label, M.log.OK)
         end
 
-        if GUARD_SAFE_ZONE then
+        if M.safeZone then
             lockCamera()
             pcall(function()
                 hum:MoveTo(root.Position)
@@ -166,6 +169,8 @@ function M.startFastClick()
     FC.desc = workspace.DescendantAdded:Connect(function(d)
         if d:IsA("ProximityPrompt") then M.applyHoldDuration(d) end
     end)
+    M.fastClickShown = FC.shown
+    M.fastClickDesc  = FC.desc
     FC.beat = RunService.Heartbeat:Connect(function()
         FC.n += 1
         if FC.n >= 15 then FC.n = 0; M.scanAllPrompts() end

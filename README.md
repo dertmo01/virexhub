@@ -1,8 +1,10 @@
 # VIREX HUB · ANTI-GUARD
 
-Roblox GUI script — **Anti Hit** dodge route + **Auto Run Base** return, with a live console.
+Roblox GUI script — **Anti Hit** dodge route, **Auto Run Base** return and
+**Auto Fetch**, with a live console and a self-test that proves which parts the
+server actually accepts.
 
-Single self-contained Luau file. No `require`, no sibling modules, no setup.
+Paste one line. The loader fetches everything else. No `require`, no setup.
 
 ---
 
@@ -14,7 +16,31 @@ Copy this into your executor and run it:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"))()
 ```
 
-Or just paste the contents of [`virexhub.lua`](virexhub.lua) straight into your executor — the file **is** the script.
+The loader is the only file you need. It fetches `src/` at run time, so fixes
+land without you re-pasting anything.
+
+### Layout
+
+| file | what it does |
+|---|---|
+| `virexhub.lua` | the loader — fetches and wires everything (94 lines) |
+| `src/init.lua` | dependency wiring and startup |
+| `src/core/log.lua` | logging, self-test scoring, clipboard export |
+| `src/core/util.lua` | character lookups, knockback stripper |
+| `src/core/transport.lua` | base detection, `flowTp`/`hopTp`/`glideTo`, Auto Run |
+| `src/core/antihit.lua` | fast click, guard watcher, the dodge |
+| `src/core/eggs.lua` | rarity index, egg discovery, Auto Fetch |
+| `src/core/selftest.lua` | runtime probes that produce the PASS/FAIL report |
+| `src/ui/kit.lua` | window, theme, widgets |
+| `src/tabs/*.lua` | the Logs / Features / Config tabs |
+
+### Tabs
+
+- **Features** — switches and live status for Anti Hit, Auto Run and Auto Fetch,
+  including the multi-select rarity chips.
+- **Logs** — the console, `COPY ALL` (summary header first, then the full log),
+  and both diagnostics buttons.
+- **Config** — return method, movement tuning, toggles, base re-detect, theme.
 
 ### That's it. Zero configuration.
 
@@ -37,7 +63,8 @@ git push
 ```
 
 …then press **F9** in-game. The script re-fetches the same URL and re-runs itself.
-You can also use **Config → ⟳ Reload script from GitHub**.
+The window is draggable by the bar under it, resizable by the corner
+handle, and collapsible to the title bar with `–`.
 
 > **F9 pulls from `master`.** If you edit the file locally without pushing, reload will just run the old code.
 
@@ -323,14 +350,22 @@ Rarities are `Divine Eternal Secret Mythic Legendary Epic Rare Uncommon Common`,
 and a `Divine` egg is always chosen over a `Legendary` no matter the distance.
 
 **Auto Fetch** is opt-in — `Config → AUTO FETCH → START`. It finds the best
-allowed egg, flows to it, fires the prompt, returns to base and repeats. `RARITY`
-cycles the filter. Nothing about it is invented: it only uses signals verified
+allowed egg, flows to it, fires the prompt, returns to base and repeats. The rarity filter is a set of
+multi-select chips, so you can allow Divine + Legendary without the six in
+between, and see the current selection at a glance. Nothing about it is invented: it only uses signals verified
 in a live export.
 
-## Anti-death (Humanoid replacement)
+## Not implemented: anti-death (Humanoid replacement)
 
-Ported from the reference's `BypassAntiCheat`. The `Humanoid` is cloned, its
-children moved across, and the original destroyed — which severs any server-side
-connection bound to the old instance. That is the likely reason this game can
-clamp `WalkSpeed` to 264 every frame. Re-applied on `CharacterAdded` and on
-death, as the reference does.
+The reference's `BypassAntiCheat` clones the `Humanoid`, moves its children
+across, and destroys the original, which severs any server-side connection bound
+to the old instance. That is the likely reason this game can clamp `WalkSpeed`
+to 264 every frame.
+
+**This is not in the script.** It was researched and deliberately left out: it
+can sever connections the game's own systems still need, so a wrong
+implementation breaks movement and state in ways that are hard to attribute. It
+should be opt-in behind a switch once it can be tested against a live export, not
+shipped on by default. Until then, treat the `WalkSpeed` clamp as a fact to work
+around — which the script does by writing position itself rather than relying on
+`WalkSpeed`.
