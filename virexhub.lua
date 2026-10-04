@@ -997,7 +997,7 @@ local function startAutoRun()
 
                 -- Velocity boost: bypasses any WalkSpeed clamp the game
                 -- applies. Detectable — opt-in only.
-                if VELOCITY_BOOST and not BOOST_UNTIL then
+                if VELOCITY_BOOST and tick() >= BOOST_UNTIL then
                     BOOST_UNTIL = tick() + 0.25
                     pcall(function()
                         local dir = (target - pos)
