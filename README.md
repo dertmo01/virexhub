@@ -52,16 +52,42 @@ It stays draggable while minimized, and changing GUI size keeps it collapsed.
 
 ### 🛡 Anti Hit
 
-Toggle **ON**, then interact with an egg. When the game's `ProximityPrompt` fires, the script snaps you through a 9-point dodge route, then triggers the return leg.
+Toggle **ON** and two things start:
+
+- **Fast click** — every `ProximityPrompt` in `workspace` *and* `PlayerGui`
+  gets `HoldDuration = 0`, re-applied on `ProximityPromptService.PromptShown`
+  and swept again every ~0.5s (prompts get recreated as eggs spawn). This is
+  what makes the egg pickup actually trigger instantly.
+- **Guard watch** — polls `PlayerGui:FindFirstChild("DropHeldEgg", true).Enabled`
+  every `0.01s` and dodges on the rising edge. `ProximityPrompt` is kept as a
+  second trigger; the log names which one fired.
+
+Two dodge styles (**Config → Guard dodge: safe zone**):
+
+- **🛡 SAFE ZONE** *(default)* — freezes the camera, snaps to `(550, 70, -431)`,
+  sits out the swing for 1s, then returns to your exact pre-guard CFrame.
+- **🗺 WAYPOINTS** — the 9-point dodge route.
 
 ### 🏠 Auto Run Base
 
-Returns you to base after the dodge route. Two methods:
+Returns you to base after the dodge. Three methods, tried in order:
 
-- **⚡ TELEPORT** (default) — CFrame snap, **self-verifying**: after the snap it waits 120 ms and re-reads your position. If you're within 8 studs it reports `ARRIVED at base (TP)`. If the server rubber-bands you back it logs `TP was rejected / rubber-banded — falling back to walking` and switches to walking automatically.
-- **🚶 WALK** — forced `WalkSpeed` every frame (counters server-side resets) and `MoveTo` the base until within range.
+- **🪂 GLIDE** *(default)* — `BodyVelocity` + `BodyGyro` with `PlatformStand`
+  at `P=5000`, cruising 80 studs above the destination, then a hard `CFrame`
+  snap inside the last **3 studs** and momentum zeroed. This is the only one
+  that reliably survives server-side position validation, because the bulk of
+  the move is ordinary physics replication rather than one huge jump. Falls
+  back to TELEPORT if it doesn't stick.
+- **⚡ TELEPORT** — direct CFrame snap, self-verifying. Falls back to WALK.
+- **🚶 WALK** — forced `WalkSpeed` every frame (counters server-side resets)
+  and `MoveTo` the base until within range, with stuck detection.
 
-The `AUTO RUN BASE` card can also be toggled on its own to trigger a return without the anti-hit route.
+The `AUTO RUN BASE` card can also be toggled on its own to trigger a return
+without the anti-hit route.
+
+**Base resolution:** `Player.RespawnLocation` → first `SpawnLocation` in
+`workspace` → hardcoded `(663, 70, -369)`. Run **📍 Scan spawn locations** to
+confirm which one your account uses.
 
 ---
 
@@ -70,24 +96,26 @@ The `AUTO RUN BASE` card can also be toggled on its own to trigger a return with
 ### Return to Base
 | Option | Default | Range |
 |---|---|---|
-| Method | TELEPORT | TELEPORT / WALK |
+| Method | GLIDE | GLIDE / TELEPORT / WALK |
 | TP offset (studs up) | 5 | 0–30 |
 | Run speed (`WalkSpeed`) | 300 | 16–800 |
 | Arrive distance (studs) | 30 | 4–50 |
 | Walk timeout (sec) | 90 | 10–300 |
 | Re-fire egg prompt on return | ON | on / off |
+| Guard dodge: safe zone | ON | on / off |
 | Ignore big-egg slowdown | ON | on / off |
 | Velocity boost (detectable) | OFF | on / off |
 
-**Big eggs are part of this flow.** The script re-fires the egg prompt on the way
-out, which is what picks the egg up, and you carry it home. Most games of this type
-halve `WalkSpeed` while a big egg is carried. *Ignore big-egg slowdown* (on by
-default) detects that and forces 2× the configured speed instead. Run
-**🥚 Check carry status + speed** to see what it's reading off your character.
+**Big eggs are part of this flow.** The egg prompt is now instant
+(`HoldDuration = 0`), which is what picks the egg up, and you carry it home.
+Most games of this type halve `WalkSpeed` while a big egg is held. *Ignore
+big-egg slowdown* (on by default) detects that and forces 2× the configured
+speed instead. Run **🥚 Check carry status + speed** to see what it's reading
+off your character.
 
 **Velocity boost** pushes `AssemblyLinearVelocity` toward the base every frame,
-which bypasses any `WalkSpeed` clamp the game applies. It's the most effective
-option and the most detectable — off by default for that reason.
+which bypasses any `WalkSpeed` clamp the game applies. It's the most detectable
+option — off by default for that reason.
 
 ### Why it sometimes walks when you expected a TP
 
@@ -140,6 +168,12 @@ Check the Console tab. If it's empty the script errored before `log()` was avail
 
 ## Notes
 
+- Reloads are reload-safe: a handle is parked in `getgenv()`/`_G` under `VirexHub`, and each new run shuts down the previous one's threads before building anything. Re-running the loader repeatedly won't stack engines or duplicate GUIs. `shutdown()` also tears down the fast-click scanner, guard watcher and camera lock.
 - The file is a **bare chunk** — no `return` statement. That is what makes the `loadstring` loader work. It will **not** run as a Roblox `ModuleScript`.
-- Reloads are reload-safe: a handle is parked in `getgenv()`/`_G` under `VirexHub`, and each new run shuts down the previous one's threads before building anything. Re-running the loader repeatedly won't stack engines or duplicate GUIs.
-- Base position resolution order: `Player.RespawnLocation` → first `SpawnLocation` found in `workspace` → hardcoded fallback `(533, 70, -366)`. Run **📍 Scan spawn locations** to confirm which one your account uses.
+
+## Credits
+
+The guard-detection, fast-click, glide-TP and safe-zone mechanics are adapted from
+[`hotibody99828/stealvip2`](https://github.com/hotibody99828/stealvip2) — specifically
+`Features/AntiGuard.lua` (`SAFE_ZONE`, `StartFastClick`, camera lock) and
+`Features/DropEgg.lua` (`BodyVelocity`/`BodyGyro` glide with a late CFrame snap).

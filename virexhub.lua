@@ -447,8 +447,8 @@ local function tpTo(position, offsetY)
     return (r.Position - dest).Magnitude <= 8
 end
 
--- Fire the egg's ProximityPrompt. This is what actually picks the egg up in
--- this game; the AskFieldEggCarry remote alone does nothing on its own.
+-- Fire the egg's ProximityPrompt. Kept as a fallback only -- see applyFastClick,
+-- which zeroes HoldDuration and is what actually makes prompts instant.
 local function fireEggPrompt(prompt)
     if not prompt then return false end
     if type(fireproximityprompt) == "function" then
@@ -457,7 +457,194 @@ local function fireEggPrompt(prompt)
     return false
 end
 
-local FALLBACK_BASE = Vector3.new(533,70,-366)
+-- ======================================================
+-- FAST CLICK -- zero every ProximityPrompt HoldDuration
+-- ======================================================
+-- ported from the stealvip2 reference (Features/AntiGuard.lua StartFastClick).
+-- Setting HoldDuration = 0 is what makes the egg prompt trigger instantly;
+-- previously we relied on fireproximityprompt, which most executors either
+-- don't expose or no-op, and that is why pickup silently did nothing.
+local _fcShownConn = nil
+local _fcBeatConn  = nil
+local _fcCount     = 0
+
+local function applyHoldDuration(prompt)
+    if not prompt then return end
+    pcall(function() prompt.HoldDuration = 0 end)
+end
+
+local function scanAllPrompts()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then applyHoldDuration(d) end
+    end
+    local pg = Player:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then applyHoldDuration(d) end
+        end
+    end
+end
+
+local function stopFastClick()
+    if _fcShownConn then _fcShownConn:Disconnect(); _fcShownConn = nil end
+    if _fcBeatConn  then _fcBeatConn:Disconnect();  _fcBeatConn  = nil end
+    _fcCount = 0
+end
+
+local function startFastClick()
+    stopFastClick()
+    scanAllPrompts()
+    _fcShownConn = ProximityPromptService.PromptShown:Connect(function(prompt)
+        applyHoldDuration(prompt)
+    end)
+    -- resweep ~every 0.5s: prompts get recreated as eggs spawn
+    _fcBeatConn = RunService.Heartbeat:Connect(function()
+        _fcCount += 1
+        if _fcCount >= 30 then
+            _fcCount = 0
+            scanAllPrompts()
+        end
+    end)
+    log("Fast click: every ProximityPrompt HoldDuration set to 0", LOG_OK)
+end
+
+-- ======================================================
+-- CAMERA LOCK
+-- ======================================================
+-- Holding the camera still across a teleport keeps the snap from being
+-- obvious on-screen. Reference does the same around its safe-zone CFrame.
+local _camLockConn = nil
+local _camLockCFrame = nil
+
+local function lockCamera()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    _camLockCFrame = cam.CFrame
+    if _camLockConn then _camLockConn:Disconnect() end
+    _camLockConn = RunService.RenderStepped:Connect(function()
+        if not _camLockCFrame then return end
+        local c = workspace.CurrentCamera
+        if c then
+            c.CFrame = _camLockCFrame
+            c.Focus = _camLockCFrame
+        end
+    end)
+end
+
+local function unlockCamera()
+    if _camLockConn then _camLockConn:Disconnect(); _camLockConn = nil end
+    _camLockCFrame = nil
+end
+
+-- ======================================================
+-- GLIDE TP
+-- ======================================================
+-- Why this exists: a single CFrame.new() across the whole map is what the
+-- server rubber-bands, and that is why plain "TP" kept failing here. The
+-- reference (Features/DropEgg.lua) instead glides with BodyVelocity +
+-- PlatformStand, which is ordinary physics replication, and only hard-snaps
+-- the CFrame in the last few studs where the correction threshold can't tell
+-- the difference. Returns true only if the snap actually stuck.
+local GLIDE_OFFSET   = 80      -- cruise height above the destination
+local GLIDE_ARRIVE   = 3       -- snap inside this radius
+local GLIDE_P        = 5000
+local GLIDE_GYRO_P   = 50000
+local GLIDE_GYRO_D   = 2000
+local GLIDE_TIMEOUT  = 12
+
+local function glideTo(position, offsetY)
+    local root = getRoot()
+    local hum  = getHumanoid()
+    if not root or not hum then return false end
+
+    local dest = position + Vector3.new(0, offsetY or 0, 0)
+    local flyPos = position + Vector3.new(0, (offsetY or 0) + GLIDE_OFFSET, 0)
+
+    local bv, bg
+    pcall(function()
+        hum.PlatformStand = true
+        bv = Instance.new("BodyVelocity")
+        bv.Name = "VirexBV"; bv.MaxForce = Vector3.new(math.huge,math.huge,math.huge)
+        bv.P = GLIDE_P; bv.Velocity = Vector3.zero; bv.Parent = root
+        bg = Instance.new("BodyGyro")
+        bg.Name = "VirexBG"; bg.MaxTorque = Vector3.new(math.huge,math.huge,math.huge)
+        bg.P = GLIDE_GYRO_P; bg.D = GLIDE_GYRO_D; bg.CFrame = root.CFrame; bg.Parent = root
+    end)
+    if not bv then return false end
+
+    local start = tick()
+    local conn
+    local finished = false
+    local ok = false
+
+    local function cleanup(keepStand)
+        if conn then conn:Disconnect(); conn = nil end
+        if bv then pcall(function() bv.Velocity = Vector3.zero; bv.MaxForce = Vector3.zero end); bv:Destroy(); bv = nil end
+        if bg then pcall(function() bg.MaxTorque = Vector3.zero end); bg:Destroy(); bg = nil end
+        -- belt and braces: remove any strays
+        local r = getRoot()
+        if r then
+            for _, c in ipairs(r:GetChildren()) do
+                if c.Name == "VirexBV" or c.Name == "VirexBG" then pcall(function() c:Destroy() end) end
+            end
+        end
+        local h = getHumanoid()
+        if h and not keepStand then pcall(function() h.PlatformStand = false end) end
+    end
+
+    conn = RunService.Heartbeat:Connect(function()
+        if finished then return end
+        local r, h = getRoot(), getHumanoid()
+        if not r or not h or h.Health <= 0 then finished = true; cleanup(); return end
+        if not bv or not bg then finished = true; return end
+
+        local dir = flyPos - r.Position
+        local horiz = Vector3.new(dir.X, 0, dir.Z).Magnitude
+        local vert  = math.abs(dir.Y)
+
+        if horiz <= GLIDE_ARRIVE and vert <= 2 then
+            finished = true
+            -- land exactly, then kill momentum
+            task.spawn(function()
+                task.wait(0.05)
+                cleanup(true)
+                local r2 = getRoot()
+                if r2 then
+                    pcall(function()
+                        r2.CFrame = CFrame.new(dest)
+                        r2.AssemblyLinearVelocity  = Vector3.zero
+                        r2.AssemblyAngularVelocity = Vector3.zero
+                    end)
+                end
+                local h2 = getHumanoid()
+                if h2 then pcall(function() h2.PlatformStand = false end) end
+                task.wait(0.12)
+                local r3 = getRoot()
+                ok = (r3 and (r3.Position - dest).Magnitude <= 8) or false
+            end)
+            return
+        end
+
+        if tick() - start > GLIDE_TIMEOUT then
+            finished = true
+            cleanup()
+            log("Glide: timed out after "..GLIDE_TIMEOUT.."s", LOG_WARN)
+            return
+        end
+
+        pcall(function()
+            bv.Velocity = dir.Unit * math.clamp(dir.Magnitude * 2.2, 90, 4000)
+            bg.CFrame = CFrame.new(r.Position, r.Position + Vector3.new(dir.X, 0, dir.Z))
+        end)
+    end)
+
+    while not finished do task.wait(0.05) end
+    task.wait(0.2)
+    return ok
+end
+
+-- stealvip2's DropEgg.POSITION_1 -- the reference's own deposit spot.
+local FALLBACK_BASE = Vector3.new(663,70,-369)
 
 local function getBasePosition()
     local rl = Player.RespawnLocation
@@ -485,6 +672,9 @@ end
 -- ======================================================
 local AntiHitEnabled = false
 local AntiHitRunning = false
+-- Forward-declared: the Anti Hit toggle below wires these up, but they are
+-- defined further down next to the guard watcher itself.
+local startGuardWatch, stopGuardWatch
 local ANTI_HIT_STEP  = 0.005
 
 local ROUTE_WAYPOINTS = {
@@ -563,13 +753,21 @@ end
 ahCard.Activated:Connect(function()
     playClick(); AntiHitEnabled = not AntiHitEnabled; setAhVisual(AntiHitEnabled)
     log("AntiHit toggled: "..(AntiHitEnabled and "ON" or "OFF"), AntiHitEnabled and LOG_OK or LOG_WARN)
+    if AntiHitEnabled then
+        startFastClick()
+        startGuardWatch()
+    else
+        stopFastClick()
+        stopGuardWatch()
+        unlockCamera()
+    end
 end)
 setAhVisual(false)
 
 -- ======================================================
 -- FEATURE 2 : AUTO RUN BASE
 -- ======================================================
-local RETURN_TP   = true    -- true = CFrame snap, false = walk
+local RETURN_METHOD = "GLIDE"  -- "GLIDE" | "TELEPORT" | "WALK"
 local TP_OFFSET   = 5
 local RUN_SPEED   = 300
 local ARRIVE_DIST = 30
@@ -579,6 +777,7 @@ local VELOCITY_BOOST = false  -- opt-in; bypasses WalkSpeed clamps (detectable)
 local BOOST_SPEED = 250
 local BOOST_UNTIL = 0
 local IGNORE_CARRY_SLOW = true  -- compensate the big-egg WalkSpeed penalty
+local GUARD_SAFE_ZONE  = true  -- safe-zone CFrame dodge instead of waypoint route
 
 -- Games commonly halve WalkSpeed while you carry a "Big Egg". Read that off
 -- the character so we can log it and compensate.
@@ -712,7 +911,7 @@ local function startAutoRun()
     AutoRunEnabled = true
     AutoRunning = true
     BOOST_UNTIL = 0
-    setArVisual("running", RETURN_TP and "Teleporting to base..." or "Running to base...")
+    setArVisual("running", RETURN_METHOD == "WALK" and "Running to base..." or "Teleporting to base...")
 
     task.spawn(function()
         local target = getBasePosition()
@@ -728,20 +927,34 @@ local function startAutoRun()
             task.wait(0.25)
         end
 
-        -- Per-run flag. Deliberately NOT the RETURN_TP setting: mutating that
-        -- permanently downgraded every future run while the Config buttons
+        -- Per-run method. Deliberately NOT the RETURN_METHOD setting: mutating
+        -- that permanently downgraded every future run while the Config buttons
         -- kept showing TELEPORT selected, so the UI lied about the mode.
-        local useTP = RETURN_TP
+        local method = RETURN_METHOD
         local arrived = false
 
-        if useTP then
+        -- GLIDE first: BodyVelocity + late CFrame snap. This is the only one
+        -- that survives server-side position validation, because the bulk of
+        -- the move is ordinary physics replication rather than one huge jump.
+        if method == "GLIDE" then
+            setArVisual("running","Gliding to base...")
+            if glideTo(target, TP_OFFSET) then
+                log("AutoRun: ARRIVED at base (glide)", LOG_OK)
+                arrived = true
+            else
+                log("AutoRun: glide failed — trying direct TP", LOG_WARN)
+                method = "TELEPORT"
+            end
+        end
+
+        if not arrived and method == "TELEPORT" then
             if tpTo(target, TP_OFFSET) then
                 log("AutoRun: ARRIVED at base (TP)", LOG_OK)
                 arrived = true
             else
-                log("AutoRun: TP rejected — walking instead (setting unchanged, next run retries TP)", LOG_WARN)
+                log("AutoRun: TP rejected — walking instead (setting unchanged, next run retries)", LOG_WARN)
                 setArVisual("running","TP blocked, walking...")
-                useTP = false
+                method = "WALK"
             end
         end
 
@@ -874,6 +1087,99 @@ local function resolveEggName(prompt)
     return prompt.Parent and prompt.Parent.Name or "?"
 end
 
+-- ── SAFE ZONE (from the stealvip2 reference, AntiGuard.SAFE_ZONE) ──
+local SAFE_ZONE = Vector3.new(550, 70, -431)
+local SAFE_WAIT = 1
+
+-- Both triggers funnel into here so we can compare which one actually fires.
+local function beginDodge(reason)
+    if not AntiHitEnabled or AntiHitRunning then return end
+    task.spawn(function()
+        log("Guard dodge triggered via "..reason, LOG_WARN)
+        if GUARD_SAFE_ZONE then
+            -- Reference approach: freeze the camera, snap to the safe zone,
+            -- sit out the guard's swing, then return to exactly where we were.
+            local root = getRoot()
+            local hum  = getHumanoid()
+            if root and hum then
+                AntiHitRunning = true
+                local original = root.CFrame
+                lockCamera()
+                pcall(function()
+                    hum:MoveTo(root.Position)
+                    hum.WalkSpeed = 0
+                    root.CFrame = CFrame.new(SAFE_ZONE)
+                    root.AssemblyLinearVelocity  = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                end)
+                log("AntiHit: safe zone for "..SAFE_WAIT.."s", LOG_INFO)
+                task.wait(SAFE_WAIT)
+                local r2 = getRoot()
+                if r2 then
+                    pcall(function()
+                        r2.CFrame = original
+                        r2.AssemblyLinearVelocity  = Vector3.zero
+                        r2.AssemblyAngularVelocity = Vector3.zero
+                    end)
+                end
+                unlockCamera()
+                AntiHitRunning = false
+                log("AntiHit: returned to pre-guard position", LOG_OK)
+            end
+        else
+            runAntiHitRoute()
+        end
+    end)
+end
+
+-- ── GUARD WATCHER: DropHeldEgg.Enabled ──
+-- The reference (Features/AntiGuard.lua) treats this ScreenGui's Enabled
+-- flag as the authoritative "egg collect / guard" signal and polls it every
+-- 0.01s. It is a much earlier and more reliable trigger than ProximityPrompt,
+-- which only fires once the hold completes. We keep both and log which fired.
+local _guardThread = nil
+local _guardLast   = false
+
+local function getDropHeldEgg()
+    local pg = Player:FindFirstChildOfClass("PlayerGui")
+    if not pg then return nil end
+    return pg:FindFirstChild("DropHeldEgg", true)
+end
+
+stopGuardWatch = function()
+    if _guardThread then pcall(function() task.cancel(_guardThread) end); _guardThread = nil end
+    _guardLast = false
+end
+
+startGuardWatch = function()
+    stopGuardWatch()
+    _guardLast = false
+    _guardThread = task.spawn(function()
+        local obj
+        while AntiHitEnabled do
+            task.wait(0.01)
+            if not AntiHitEnabled then break end
+            if not obj or not obj.Parent then obj = getDropHeldEgg() end
+            if obj then
+                local now = (obj.Enabled == true)
+                -- rising edge only, so a held-true flag doesn't spam
+                if now and not _guardLast then
+                    _guardLast = true
+                    beginDodge("DropHeldEgg.Enabled")
+                elseif not now then
+                    _guardLast = false
+                end
+            end
+        end
+    end)
+    local o = getDropHeldEgg()
+    if o then
+        log("Guard watch: found DropHeldEgg ("..o.ClassName..")", LOG_OK)
+    else
+        log("Guard watch: DropHeldEgg not in PlayerGui yet — prompt trigger still active", LOG_WARN)
+    end
+end
+
 ProximityPromptService.PromptTriggered:Connect(function(prompt, player)
     if player ~= Player then return end
 
@@ -887,11 +1193,11 @@ ProximityPromptService.PromptTriggered:Connect(function(prompt, player)
     if not Player.Character then log("Prompt: no character!", LOG_ERR); return end
 
     task.spawn(function()
-        runAntiHitRoute()
         log("AntiHit: route finished, heading home...", LOG_OK)
         task.wait(0.5)
         if not AutoRunning then startAutoRun() end
     end)
+    beginDodge("ProximityPrompt")
 end)
 
 -- ======================================================
@@ -977,18 +1283,25 @@ end
 cfgLabel("RETURN TO BASE")
 local retRow=Instance.new("Frame"); retRow.Size=UDim2.new(1,-8,0,40)
 retRow.BackgroundTransparency=1; retRow.Parent=configPage
-local retTP   = segBtn(retRow, 0.5, 0,   "⚡ TELEPORT")
-local retWalk = segBtn(retRow, 0.5, 0.5, "🚶 WALK")
+local retGlide = segBtn(retRow, 0.34, 0,    "🪂 GLIDE")
+local retTP    = segBtn(retRow, 0.33, 0.34, "⚡ TELEPORT")
+local retWalk  = segBtn(retRow, 0.33, 0.67, "🚶 WALK")
 local function refreshRetButtons()
-    retTP.BackgroundColor3   = RETURN_TP   and Color3.fromRGB(35,120,200) or Themes[1].Panel
-    retWalk.BackgroundColor3 = (not RETURN_TP) and Color3.fromRGB(35,120,200) or Themes[1].Panel
+    local on = Color3.fromRGB(35,120,200)
+    retGlide.BackgroundColor3 = (RETURN_METHOD == "GLIDE")    and on or Themes[1].Panel
+    retTP.BackgroundColor3    = (RETURN_METHOD == "TELEPORT") and on or Themes[1].Panel
+    retWalk.BackgroundColor3  = (RETURN_METHOD == "WALK")     and on or Themes[1].Panel
 end
+retGlide.Activated:Connect(function()
+    playClick(); RETURN_METHOD = "GLIDE"; refreshRetButtons()
+    log("Return method = GLIDE (BodyVelocity + late CFrame snap, hardest to detect)", LOG_INFO)
+end)
 retTP.Activated:Connect(function()
-    playClick(); RETURN_TP = true; refreshRetButtons()
-    log("Return method = TELEPORT (self-verifying)", LOG_INFO)
+    playClick(); RETURN_METHOD = "TELEPORT"; refreshRetButtons()
+    log("Return method = TELEPORT (direct CFrame snap, self-verifying)", LOG_INFO)
 end)
 retWalk.Activated:Connect(function()
-    playClick(); RETURN_TP = false; refreshRetButtons()
+    playClick(); RETURN_METHOD = "WALK"; refreshRetButtons()
     log("Return method = WALK", LOG_INFO)
 end)
 refreshRetButtons()
@@ -1002,6 +1315,11 @@ makeStepper("ARRIVE DISTANCE  (studs)", ARRIVE_DIST, 4, 50, 2, function(v) retur
 makeStepper("WALK TIMEOUT  (sec)", WALK_TIMEOUT, 10, 300, 10, function(v) return v.." s" end,
     function(v) WALK_TIMEOUT = v end)
 makeToggle("RE-FIRE EGG PROMPT ON RETURN", GRAB_EGG, function(on) GRAB_EGG = on end)
+makeToggle("GUARD DODGE: SAFE ZONE", GUARD_SAFE_ZONE, function(on)
+    GUARD_SAFE_ZONE = on
+    log(on and ("Guard dodge = safe zone at "..tostring(SAFE_ZONE)..", return after "..SAFE_WAIT.."s")
+        or "Guard dodge = 9-point waypoint route", LOG_INFO)
+end)
 makeToggle("IGNORE BIG-EGG SLOWDOWN", IGNORE_CARRY_SLOW, function(on)
     IGNORE_CARRY_SLOW = on
     log(on and "Big-egg WalkSpeed penalty will be overridden (2x speed while carrying)"
@@ -1073,7 +1391,7 @@ carryBtn.Activated:Connect(function()
     if root then
         log("Distance to base = "..math.floor((root.Position - base).Magnitude).." studs", LOG_INFO)
     end
-    log("Return method = "..(RETURN_TP and "TELEPORT" or "WALK"), LOG_INFO)
+    log("Return method = "..RETURN_METHOD, LOG_INFO)
 end)
 
 -- ── LOOK ─────────────────────────────────────────────
@@ -1259,6 +1577,9 @@ local function closeGui()
     if AntiHitEnabled then
         AntiHitEnabled = false
         setAhVisual(false)
+        stopFastClick()
+        stopGuardWatch()
+        unlockCamera()
         log("GUI closed → Anti Hit disabled", LOG_WARN)
     end
     setArVisual("off","OFF")
@@ -1363,6 +1684,11 @@ refreshTabs()
 RUN.shutdown = function()
     pcall(function() AutoRunEnabled = false; AutoRunning = false; stopSpeedForce() end)
     pcall(function() AntiHitEnabled = false end)
+    -- new in this revision: these all hold connections, so a reload that left
+    -- them running would stack a second fast-click scanner and camera lock
+    pcall(function() stopFastClick() end)
+    pcall(function() stopGuardWatch() end)
+    pcall(function() unlockCamera() end)
     pcall(function() gui:Destroy() end)
 end
 rawset(HOST, "VirexHub", RUN)
@@ -1401,6 +1727,6 @@ task.delay(1, function()
     log("loadstring: "..(HAS_LOADSTRING and "available (F9 = reload)" or "UNAVAILABLE"), HAS_LOADSTRING and LOG_OK or LOG_WARN)
     log("fireproximityprompt: "..(type(fireproximityprompt)=="function" and "available" or "MISSING — re-fire egg prompt will not work"),
         type(fireproximityprompt)=="function" and LOG_OK or LOG_ERR)
-    log("Return method: "..(RETURN_TP and "TELEPORT (self-verifying, falls back to walk)" or "WALK"), LOG_INFO)
+    log("Return method: "..RETURN_METHOD.."; glide falls back to TP, TP falls back to walk", LOG_INFO)
     log("Toggle ANTI HIT, then interact with an egg — route runs, then returns home", LOG_INFO)
 end)
