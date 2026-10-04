@@ -33,7 +33,6 @@ local RUN = { shutdown = function() end }
 -- these, but they are configured much further down. Declared here as locals so
 -- that reference resolves to the real setting instead of a nil global.
 local AntiHitEnabled, AntiHitRunning, RETURN_METHOD
-local HOP_WORKS, SNAP_WORKS, FLOW_WORKS
 local BASE_OVERRIDE, BASE_LABEL, GUARD_SAFE_ZONE, BASE_CACHED
 
 local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
@@ -574,11 +573,24 @@ local function flowTp(position, offsetY, label)
     local slowest  = FLOW_SPEED
     local conn
 
+    -- The reference sets PlatformStand for the whole flight (TeleportSystem
+    -- FlyTo). Without it the game's own locomotion keeps writing to the
+    -- HumanoidRootPart and fights every one of our writes, which the server
+    -- sees as a conflict and resolves by correcting us. This is why the same
+    -- 755 studs took 0.3s on one run and 23.2s on another.
+    local hum0 = getHumanoid()
+    local hadPlatformStand = false
+    if hum0 then
+        hadPlatformStand = hum0.PlatformStand
+        pcall(function() hum0.PlatformStand = true end)
+    end
+
     conn = RunService.Heartbeat:Connect(function()
         local r  = getRoot()
         local hu = getHumanoid()
         if not r or not hu or hu.Health <= 0 then
             conn:Disconnect()
+            if hu then pcall(function() hu.PlatformStand = hadPlatformStand end) end
             return
         end
 
@@ -597,6 +609,7 @@ local function flowTp(position, offsetY, label)
         end
         if os.clock() - t0 > FLOW_TIMEOUT then
             conn:Disconnect()
+            pcall(function() hu.PlatformStand = hadPlatformStand end)
             return
         end
 
@@ -2005,21 +2018,18 @@ local function runMovementSelfTest()
     -- 0. frame-stepped flow over a long distance -- this is the one that should
     -- win. Ported from stealvip2's TeleportSystem, which is how that hub moves
     -- a character across the map without tripping the anti-teleport check.
-    local flowOK, flowInfo = flowTp(far, 0, "probe")
-    FLOW_WORKS = flowOK
-    st(flowOK, "Frame-stepped flow reaches 180 studs", flowInfo)
+    local probeFlowOK, flowInfo = flowTp(far, 0, "probe")
+    st(probeFlowOK, "Frame-stepped flow reaches 180 studs", flowInfo)
     goHome()
 
     -- 1. multi-hop TP over a long distance -- fallback
     local hopOK, hopInfo = hopTp(far, 0)
-    HOP_WORKS = hopOK
     st(hopOK, "Multi-hop TP holds over 180 studs",
         hopOK and ("landed in "..tostring(hopInfo).." hops") or ("failed: "..tostring(hopInfo)))
     goHome()
 
     -- 2. does a single direct CFrame snap hold at all?
     local snapOK = tpTo(origin, 3)
-    SNAP_WORKS = snapOK
     st(snapOK, "Direct CFrame snap holds (3 studs up)",
         snapOK and "short TELEPORT jumps are accepted" or "even short snaps are corrected")
 
@@ -2082,6 +2092,7 @@ local function runMovementSelfTest()
     if SELFTEST.fail > 0 then
         log("Movement FAILs above mean the server is rejecting client position writes for that method.", LOG_ERR)
     end
+    return probeFlowOK
 end
 
 -- ======================================================
@@ -2819,20 +2830,25 @@ task.delay(2.5, function()
     -- choose. Runs vertically and along +X then returns, so it cannot strand
     -- them. Everything after this falls back automatically anyway.
     task.spawn(function()
-        log("Probing transport methods over a 400-stud distance...", LOG_INFO)
-        runMovementSelfTest()
-        if FLOW_WORKS then
-            RETURN_METHOD = "FLOW"
-            log("Transport selected: FLOW (frame-stepped, server-paced)", LOG_OK)
-        elseif HOP_WORKS then
-            RETURN_METHOD = "HOP"
-            log("Transport selected: HOP (multi-hop TP verified)", LOG_OK)
-        elseif SNAP_WORKS then
-            RETURN_METHOD = "TELEPORT"
-            log("Transport selected: TELEPORT (direct snap verified)", LOG_OK)
+        -- Deliberately NOT at startup. The probe used to run ~2.5s after load
+        -- and it is worthless there: the export caught it rejecting a 3-stud
+        -- snap, rejecting hops at 0.55s spacing, and rejecting flow -- all
+        -- within seconds of joining -- while the SAME code covered 755 studs
+        -- in 0.3s a minute later. There is a warmup window right after spawn
+        -- during which position writes are refused. Because the probe reported
+        -- failure it demoted the transport to WALK, which is why the player was
+        -- walking 2171 studs when FLOW would have done it in one second.
+        --
+        -- So: FLOW is the default and is never demoted on the basis of a
+        -- startup measurement. The probe runs late, purely as diagnostics, and
+        -- the real selection happens at runtime from actual journeys, which is
+        -- ground truth rather than a guess.
+        task.wait(14)
+        log("Probing transport methods (post-warmup, diagnostic only)...", LOG_INFO)
+        if runMovementSelfTest() then
+            log("Probe: FLOW works — it is the default", LOG_OK)
         else
-            RETURN_METHOD = "WALK"
-            log("Transport selected: WALK (no TP method survived — this server blocks them)", LOG_WARN)
+            log("Probe: FLOW was refused even now. If returns feel slow this is why — report it.", LOG_WARN)
         end
         refreshRetButtons()
     end)
