@@ -38,7 +38,7 @@ function M.write(msg, color)
         lbl.BackgroundTransparency = 1
         lbl.Text                   = fullMsg
         lbl.Font                   = Enum.Font.Code
-        lbl.TextSize               = 9
+        lbl.TextSize               = 11
         lbl.TextColor3             = color or M.PLAIN
         lbl.TextXAlignment         = Enum.TextXAlignment.Left
         lbl.TextWrapped            = true

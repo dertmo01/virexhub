@@ -27,7 +27,7 @@ M.Themes = {
 }
 M.themeIndex = 1
 M.sizeIndex  = 2
-M.Sizes      = { UDim2.fromOffset(320,270), UDim2.fromOffset(370,310), UDim2.fromOffset(420,355) }
+M.Sizes      = { UDim2.fromOffset(360,300), UDim2.fromOffset(420,350), UDim2.fromOffset(480,410) }
 M.SizeNames  = { "SMALL","MEDIUM","LARGE" }
 
 function M.theme() return M.Themes[M.themeIndex] end
@@ -83,7 +83,13 @@ gui.DisplayOrder = 9999
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = PlayerGui
 M.gui = gui
-Instance.new("UIScale", gui).Scale = 0.90
+-- Exposed as UI SCALE in Config. It used to be a hard 0.90, which made an
+-- already-small screen smaller: on an 800px-wide display the window rendered at
+-- effectively 90% of a size that was already tight. 1.0 is the honest default
+-- and the slider takes it up to 1.6 for small screens.
+M.uiScale = 1.0
+M._scale = Instance.new("UIScale", gui)
+M._scale.Scale = M.uiScale
 
 local shadow = Instance.new("Frame")
 shadow.Name = "Shadow"
@@ -140,7 +146,7 @@ titleLabel.Position = UDim2.fromOffset(74, 3)
 titleLabel.Size = UDim2.new(1, -148, 0, 28)
 titleLabel.Font = Enum.Font.FredokaOne
 titleLabel.Text = "VIREX"
-titleLabel.TextSize = 22
+titleLabel.TextSize = 24
 titleLabel.TextXAlignment = Enum.TextXAlignment.Center
 titleLabel.TextColor3 = Color3.new(1, 1, 1)
 titleLabel.Parent = topBar
@@ -169,7 +175,7 @@ subLabel.Position = UDim2.new(0, 58, 0, 29)
 subLabel.Size = UDim2.new(1, -116, 0, 16)
 subLabel.Font = Enum.Font.FredokaOne
 subLabel.Text = "ANTI-GUARD"
-subLabel.TextSize = 10
+subLabel.TextSize = 12
 subLabel.TextXAlignment = Enum.TextXAlignment.Center
 subLabel.TextColor3 = Color3.fromRGB(145, 145, 155)
 subLabel.Parent = topBar
@@ -183,7 +189,7 @@ local function headerBtn(text, xOff)
     b.BorderSizePixel = 0
     b.Text = text
     b.Font = Enum.Font.FredokaOne
-    b.TextSize = 16
+    b.TextSize = 18
     b.TextColor3 = Color3.new(1, 1, 1)
     b.AutoButtonColor = false
     b.Parent = topBar
@@ -220,12 +226,12 @@ Instance.new("UICorner", dragLine).CornerRadius = UDim.new(1, 0)
 local resizeHandle = Instance.new("TextButton")
 resizeHandle.Name = "ResizeHandle"
 resizeHandle.AnchorPoint = Vector2.new(0.5, 0.5)
-resizeHandle.Size = UDim2.fromOffset(30, 30)
+resizeHandle.Size = UDim2.fromOffset(36, 36)
 resizeHandle.BackgroundTransparency = 1
 resizeHandle.BorderSizePixel = 0
 resizeHandle.Text = "\226\134\170"
 resizeHandle.Font = Enum.Font.GothamBlack
-resizeHandle.TextSize = 18
+resizeHandle.TextSize = 20
 resizeHandle.TextColor3 = M.theme().Accent
 resizeHandle.AutoButtonColor = false
 resizeHandle.ZIndex = 70
@@ -327,7 +333,7 @@ function M.makeTab(name, icon, order)
     lbl.Position = UDim2.fromOffset(10, 0)
     lbl.Text = icon.."  "..name
     lbl.Font = Enum.Font.FredokaOne
-    lbl.TextSize = 10
+    lbl.TextSize = 12
     lbl.TextColor3 = Color3.new(1, 1, 1)
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.ZIndex = b.ZIndex + 2
@@ -344,7 +350,7 @@ function M.refreshTabs()
         local lbl = b:FindFirstChild("Label")
         if sel then
             if sg then sg.Visible = true end
-            if lbl then lbl.TextSize = 11 end
+            if lbl then lbl.TextSize = 13 end
             M.tw(b, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
                  { Size = UDim2.new(1, -8, 0, 40) })
             M.sweepTokens[name] = (M.sweepTokens[name] or 0) + 1
@@ -363,7 +369,7 @@ function M.refreshTabs()
         else
             M.sweepTokens[name] = (M.sweepTokens[name] or 0) + 1
             if sg then sg.Visible = false end
-            if lbl then lbl.TextSize = 10 end
+            if lbl then lbl.TextSize = 12 end
             M.tw(b, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
                  { Size = UDim2.new(1, -12, 0, 36) })
         end
@@ -388,12 +394,12 @@ end
 -- ── widgets ───────────────────────────────────────────────────────
 function M.label(parent, text, order, color)
     local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, -8, 0, 22)
+    l.Size = UDim2.new(1, -8, 0, 26)
     l.LayoutOrder = order or 0
     l.BackgroundTransparency = 1
     l.Text = text
     l.Font = Enum.Font.FredokaOne
-    l.TextSize = 11
+    l.TextSize = 13
     l.TextColor3 = color or M.theme().Accent
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.Parent = parent
@@ -408,7 +414,7 @@ function M.note(parent, text, order, color)
     l.BackgroundTransparency = 1
     l.Text = text
     l.Font = Enum.Font.Code
-    l.TextSize = 9
+    l.TextSize = 11
     l.TextWrapped = true
     l.TextColor3 = color or Color3.fromRGB(150, 155, 170)
     l.TextXAlignment = Enum.TextXAlignment.Left
@@ -418,13 +424,13 @@ end
 
 function M.button(parent, text, order, color)
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, -8, 0, 30)
+    b.Size = UDim2.new(1, -8, 0, 36)
     b.LayoutOrder = order or 0
     b.BackgroundColor3 = M.theme().Panel
     b.BorderSizePixel = 0
     b.Text = text
     b.Font = Enum.Font.FredokaOne
-    b.TextSize = 11
+    b.TextSize = 13
     b.TextColor3 = color or Color3.new(1, 1, 1)
     b.AutoButtonColor = false
     b.Parent = parent
@@ -436,7 +442,7 @@ end
 -- name so the caller can refresh which one is selected.
 function M.segRow(parent, names, labels, order, onPick)
     local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -8, 0, 40)
+    row.Size = UDim2.new(1, -8, 0, 46)
     row.BackgroundTransparency = 1
     row.LayoutOrder = order or 0
     row.Parent = parent
@@ -450,7 +456,7 @@ function M.segRow(parent, names, labels, order, onPick)
         b.BorderSizePixel = 0
         b.Text = labels[i]
         b.Font = Enum.Font.FredokaOne
-        b.TextSize = 10
+        b.TextSize = 12
         b.TextColor3 = Color3.new(1, 1, 1)
         b.AutoButtonColor = false
         b.TextWrapped = true
@@ -466,30 +472,30 @@ end
 
 function M.stepper(parent, labelText, get, set, minV, maxV, step, fmt, order)
     local wrap = Instance.new("Frame")
-    wrap.Size = UDim2.new(1, -8, 0, 30)
+    wrap.Size = UDim2.new(1, -8, 0, 36)
     wrap.BackgroundTransparency = 1
     wrap.LayoutOrder = order or 0
     wrap.Parent = parent
 
     local name = Instance.new("TextLabel")
-    name.Size = UDim2.new(1, -104, 1, 0)
+    name.Size = UDim2.new(1, -168, 1, 0)
     name.BackgroundTransparency = 1
     name.Text = labelText
     name.Font = Enum.Font.FredokaOne
-    name.TextSize = 10
+    name.TextSize = 12
     name.TextColor3 = Color3.new(1, 1, 1)
     name.TextXAlignment = Enum.TextXAlignment.Left
     name.Parent = wrap
 
     local function mkBtn(txt, x)
         local b = Instance.new("TextButton")
-        b.Size = UDim2.fromOffset(28, 24)
-        b.Position = UDim2.new(0, x, 0.5, -12)
+        b.Size = UDim2.fromOffset(32, 28)
+        b.Position = UDim2.new(0, x, 0.5, -14)
         b.BackgroundColor3 = M.theme().Panel
         b.BorderSizePixel = 0
         b.Text = txt
         b.Font = Enum.Font.FredokaOne
-        b.TextSize = 12
+        b.TextSize = 14
         b.TextColor3 = Color3.new(1, 1, 1)
         b.AutoButtonColor = false
         b.Parent = wrap
@@ -498,12 +504,12 @@ function M.stepper(parent, labelText, get, set, minV, maxV, step, fmt, order)
     end
 
     local val = Instance.new("TextLabel")
-    val.Size = UDim2.fromOffset(44, 24)
-    val.Position = UDim2.new(0, 34, 0.5, -12)
+    val.Size = UDim2.fromOffset(52, 28)
+    val.Position = UDim2.new(0, 34, 0.5, -14)
     val.BackgroundTransparency = 1
     val.Text = fmt(get())
     val.Font = Enum.Font.FredokaOne
-    val.TextSize = 10
+    val.TextSize = 12
     val.TextColor3 = M.theme().Accent
     val.Parent = wrap
 
@@ -514,7 +520,7 @@ function M.stepper(parent, labelText, get, set, minV, maxV, step, fmt, order)
         set(v)
         val.Text = fmt(v)
     end
-    mkBtn("-", 82).Activated:Connect(function() M.playClick(1.3); bump(-1) end)
+    mkBtn("-", 92).Activated:Connect(function() M.playClick(1.3); bump(-1) end)
     mkBtn("+", 128).Activated:Connect(function() M.playClick(0.8); bump(1) end)
 
     return { wrap = wrap, set = function(v) set(v); val.Text = fmt(v) end }
@@ -522,7 +528,7 @@ end
 
 function M.toggle(parent, labelText, get, set, order)
     local wrap = Instance.new("Frame")
-    wrap.Size = UDim2.new(1, -8, 0, 30)
+    wrap.Size = UDim2.new(1, -8, 0, 36)
     wrap.BackgroundTransparency = 1
     wrap.LayoutOrder = order or 0
     wrap.Parent = parent
@@ -532,14 +538,14 @@ function M.toggle(parent, labelText, get, set, order)
     name.BackgroundTransparency = 1
     name.Text = labelText
     name.Font = Enum.Font.FredokaOne
-    name.TextSize = 10
+    name.TextSize = 12
     name.TextColor3 = Color3.new(1, 1, 1)
     name.TextXAlignment = Enum.TextXAlignment.Left
     name.Parent = wrap
 
     local knob = Instance.new("Frame")
-    knob.Size = UDim2.fromOffset(54, 24)
-    knob.Position = UDim2.new(1, -62, 0.5, -12)
+    knob.Size = UDim2.fromOffset(62, 28)
+    knob.Position = UDim2.new(1, -62, 0.5, -14)
     knob.BorderSizePixel = 0
     knob.Parent = wrap
     Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
@@ -552,7 +558,7 @@ function M.toggle(parent, labelText, get, set, order)
     pill.Parent = knob
 
     local dot = Instance.new("Frame")
-    dot.Size = UDim2.fromOffset(20, 20)
+    dot.Size = UDim2.fromOffset(24, 24)
     dot.BackgroundColor3 = Color3.fromRGB(210, 210, 220)
     dot.BorderSizePixel = 0
     dot.Parent = pill
@@ -563,10 +569,12 @@ function M.toggle(parent, labelText, get, set, order)
     local OFF = M.theme().Panel
     local function paint()
         knob.BackgroundColor3 = state and ON or OFF
+        -- Tween only. Setting dot.Position on the next line in the same frame
+        -- cancelled the tween before it ever ran, so the knob snapped instead of
+        -- sliding; the two Y offsets also disagreed (-10 vs -12).
         M.tw(dot, TweenInfo.new(0.14), {
-            Position = UDim2.new(state and 1 - 0 and 0.63 or 0.08, 0, 0.5, -10),
+            Position = UDim2.new(state and 0.62 or 0.06, 0, 0.5, -14),
         })
-        dot.Position = UDim2.new(state and 0.63 or 0.08, 0, 0.5, -10)
     end
     paint()
 
@@ -593,7 +601,7 @@ function M.chipRow(parent, names, isOn, onToggle, order, perRow)
     grid.LayoutOrder = order or 0
     grid.Parent = parent
     local lay = Instance.new("UIGridLayout")
-    lay.CellSize = UDim2.new(1 / perRow, -4, 0, 26)
+    lay.CellSize = UDim2.new(1 / perRow, -4, 0, 34)
     lay.CellPadding = UDim2.new(0, 4, 0, 4)
     lay.SortOrder = Enum.SortOrder.LayoutOrder
     lay.Parent = grid
@@ -606,7 +614,7 @@ function M.chipRow(parent, names, isOn, onToggle, order, perRow)
         b.BorderSizePixel = 0
         b.Text = name
         b.Font = Enum.Font.FredokaOne
-        b.TextSize = 9
+        b.TextSize = 11
         b.TextColor3 = Color3.new(1, 1, 1)
         b.AutoButtonColor = false
         b.Parent = grid
@@ -655,6 +663,16 @@ function M.applyTheme()
     end
     resizeHandle.TextColor3 = t.Accent
     dragLine.BackgroundColor3 = t.Accent
+end
+
+-- UI scale is separate from window size: on a small screen you want the text
+-- large even when the window itself is small, and those are independent controls.
+function M.setUIScale(v)
+    M.uiScale = math.clamp(math.floor(v * 10) / 10, 0.8, 1.6)
+    -- Reuse the one instance. Adding a second UIScale to the same parent makes
+    -- the two scales multiply, so repeated clicks would balloon the window.
+    M._scale.Scale = M.uiScale
+    M.syncFloating()
 end
 
 function M.applySize()
@@ -718,8 +736,8 @@ UIS.InputChanged:Connect(function(i)
     if RESZ.on then
         if M.minimized then RESZ.on = false; return end
         local d = i.Position - RESZ.i
-        local w = math.clamp(RESZ.s.X.Offset + d.X * 2, 300, 520)
-        local h = math.clamp(RESZ.s.Y.Offset + d.Y * 2, 240, 520)
+        local w = math.clamp(RESZ.s.X.Offset + d.X * 2, 320, 760)
+        local h = math.clamp(RESZ.s.Y.Offset + d.Y * 2, 260, 620)
         main.Size   = UDim2.fromOffset(w, h)
         shadow.Size = UDim2.fromOffset(w, h)
     end
@@ -746,12 +764,12 @@ openBtn = Instance.new("TextButton")
 openBtn.Name = "OpenBtn"
 openBtn.AnchorPoint = Vector2.new(1, 0.5)
 openBtn.Position = UDim2.new(1, -18, 0.5, 0)
-openBtn.Size = UDim2.fromOffset(64, 64)
+openBtn.Size = UDim2.fromOffset(72, 72)
 openBtn.BackgroundColor3 = Color3.new(0, 0, 0)
 openBtn.BorderSizePixel = 0
 openBtn.Text = "VX"
 openBtn.Font = Enum.Font.FredokaOne
-openBtn.TextSize = 23
+openBtn.TextSize = 26
 openBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 openBtn.AutoButtonColor = false
 openBtn.Visible = false

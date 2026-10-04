@@ -93,7 +93,9 @@ function M.build(parent)
     local chips = ui.chipRow(parent, mods.eggs.list,
         function(name) return mods.eggs.wanted[name] end,
         function(name) mods.eggs.toggleRarity(name) end,
-        nextO(), 3)
+        -- 2 per row, not 3: "UNCOMMON" is 8 characters and at 3-per-row the
+        -- cell is only ~72px wide, which clipped it once the text was bumped.
+        nextO(), 2)
     ui.note(parent,
         "Untick everything and Auto Fetch will idle rather than grab something " ..
         "you did not ask for. Defaults to the top five.", nextO())

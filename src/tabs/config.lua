@@ -133,6 +133,18 @@ function M.build(parent)
 
     -- -- LOOK ----------------------------------------------------------
     ui.label(parent, "LOOK", nextO())
+    -- On a small screen this matters more than window size: you want the text
+    -- readable even with the window compact. Window size and text scale are
+    -- deliberately separate controls.
+    ui.stepper(parent, "TEXT SCALE",
+        function() return ui.uiScale end,
+        function(v) ui.setUIScale(v) end,
+        0.8, 1.6, 0.1,
+        function(v) return string.format("%.1fx", v) end, nextO())
+    ui.note(parent,
+        "Text scale is independent of the window size below. If the text is still " ..
+        "too small on this screen, push this to 1.4x and widen the window with " ..
+        "the corner handle.", nextO())
     local themeBtns
     local _, madeTheme = ui.segRow(parent, {"prev", "name", "next"}, {"\226\172\134", "", "\226\172\134"}, nextO(),
         function(which)

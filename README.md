@@ -87,7 +87,7 @@ could not download and shows the exact URL it tried.
 | Action | How |
 |---|---|
 | Move window | Drag the coloured bar under the window |
-| Resize window | Drag the `↘` handle at the bottom-right |
+| Resize window | Drag the `↘` handle at the bottom-right (320x260 → 760x620) |
 | Minimize | `–` in the title bar — collapses in place to just the bar |
 | Restore | `+` in the title bar (same button) |
 | Close | `×` top-right |
@@ -194,7 +194,17 @@ The movement test moves you for real. It uses 180 studs rather than 3 because a
 reports success while the feature is broken.
 
 ### Look
-GUI size (small/medium/large) and 5 themes.
+**TEXT SCALE** (0.8x–1.6x), GUI size (small/medium/large) and 5 themes.
+
+`TEXT SCALE` and the window size are separate on purpose. On a small screen you
+often want the text big while the window stays compact, so they are not tied
+together — push text scale to 1.4x and widen the window with the `↘` handle.
+
+The window resizes from **320x260 up to 760x620**, which on an 800px-wide screen
+means it can fill most of the display.
+
+> Text scale scales the whole window, not just the labels — so 1.6x makes the
+> window 1.6x bigger too. If that overflows, use 1.2x and drag the resize handle.
 
 ---
 
