@@ -52,12 +52,12 @@ local function setVisual(state, txt)
 end
 
 -- ── base resolution ─────────────────────────────────────────────
-M.M.FALLBACK_BASE = Vector3.new(663, 70, -369)
+M.FALLBACK_BASE = Vector3.new(663, 70, -369)
 -- Only words that actually name a base. "safe" and "return" were removed: they
 -- matched this game's part literally named 'SafeZone' (457,67,-364), which is
 -- the guard-dodge zone, not the player's base. Auto-detect picked it and every
 -- "return to base" then went 4 studs in the wrong direction.
-M.M.BASE_KEYWORDS = {"vase", "deposit", "base", "home"}
+M.BASE_KEYWORDS = {"vase", "deposit", "base", "home"}
 
 M.baseLabel, M.baseCached = nil, nil
 local baseResolved = false
@@ -109,16 +109,15 @@ end
 local BOOST_UNTIL = 0
 local _speedConn = nil
 local _originalWalkSpeed = 150
-local AUTO_ENABLED = true
-local GRAB_EGG = true              -- re-fire the egg prompt on the way out
-local WALK_TIMEOUT = 90
+M.autoEnabled = true          -- the Features tab toggle
+M.grabEgg     = true              -- re-fire the egg prompt on the way out
+M.walkTimeout = 90
 local CurrentEggPrompt = nil      -- set by antihit when it sees one fire
 
 M.running = false   -- a walk is in progress; antihit waits on this
-M.AUTO_ENABLED, M.GRAB_EGG = nil, nil
 M.prompt = nil                   -- last egg prompt the client fired
-function M.setAutoEnabled(v) AUTO_ENABLED = v end
-function M.setGrabEgg(v)     GRAB_EGG = v end
+function M.setAutoEnabled(v) M.autoEnabled = v end
+function M.setGrabEgg(v)     M.grabEgg = v end
 function M.setPrompt(p)      CurrentEggPrompt = p; M.prompt = p end
 
 -- ── shared pacing state ─────────────────────────────────────────
@@ -131,6 +130,15 @@ M.depositLockout = 6.0   -- after landing at base, stay still and let the deposi
 M.depositUntil   = -math.huge
 M.lastDodgeAt    = -math.huge
 function M.clearPrompt()     CurrentEggPrompt = nil; M.prompt = nil end
+-- Clearing the cache re-runs auto-detection on the next call. Auto-detection
+-- can latch onto the wrong marker, and the only way out was a full reload.
+function M.resetBaseCache()
+    baseResolved = false
+    M.baseLabel = nil
+    M.baseCached = nil
+    log("Base cache cleared; it re-detects on the next return.", M.log.INFO)
+end
+
 function M.getBasePosition()
     if M.baseOverride then
         if not baseResolved then
@@ -542,16 +550,16 @@ function M.stopAutoRun(reason)
     BOOST_UNTIL  = 0
     stopSpeedForce()
     log("AutoRun: STOPPED — "..(reason or "done"), M.log.WARN)
-    if AUTO_ENABLED then setVisual("on","ON  •  waits for egg interact")
+    if M.autoEnabled then setVisual("on","ON  •  waits for egg interact")
     else setVisual("off","OFF") end
 end
 
 function M.startAutoRun()
     if M.running then log("AutoRun: already running, skip", M.log.WARN); return end
-    -- The walk loop is gated on AUTO_ENABLED, and this is also reached from
+    -- The walk loop is gated on M.autoEnabled, and this is also reached from
     -- the prompt handler without the card ever being toggled — so enable it
     -- here or the loop exits instantly.
-    AUTO_ENABLED = true
+    M.autoEnabled = true
     M.running = true
     BOOST_UNTIL = 0
     setVisual("running", M.method == "WALK" and "Running to base..." or "Teleporting to base...")
@@ -568,7 +576,7 @@ function M.startAutoRun()
         end
 
         -- pick the egg back up on the way out, if we caught a prompt
-        if GRAB_EGG and CurrentEggPrompt then
+        if M.grabEgg and CurrentEggPrompt then
             log("AutoRun: re-firing egg prompt", M.log.INFO)
             if fireEggPrompt(CurrentEggPrompt) then
                 log("AutoRun: egg prompt fired", M.log.OK)
@@ -641,7 +649,7 @@ function M.startAutoRun()
             local stuckCount = 0
             local lastLog    = 0
 
-            while M.running and AUTO_ENABLED do
+            while M.running and M.autoEnabled do
                 local hum = getHumanoid()
                 local root = getRoot()
                 if not hum or not root then
@@ -661,7 +669,7 @@ function M.startAutoRun()
                 end
 
                 local elapsed = tick() - startTime
-                if elapsed > WALK_TIMEOUT then
+                if elapsed > M.walkTimeout then
                     stopSpeedForce()
                     log("AutoRun: timeout after "..math.floor(elapsed).."s — still "..math.floor(dist).." studs out", M.log.WARN)
                     stopAutoRun("timeout"); return
@@ -734,7 +742,7 @@ function M.startAutoRun()
             log("AutoRun: at base — holding still "..math.floor(M.depositLockout).."s for the deposit", M.log.INFO)
             local deadline = os.clock() + M.depositLockout
             while os.clock() < deadline do
-                if not M.running or AUTO_ENABLED == false then break end
+                if not M.running or M.autoEnabled == false then break end
                 local hum = getHumanoid()
                 if not hum or hum.Health <= 0 then break end
                 if not isCarryingEgg() then

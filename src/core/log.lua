@@ -11,6 +11,7 @@ M.ERR  = Color3.fromRGB(255,100,100)
 M.WARN = Color3.fromRGB(255,200,60)
 M.INFO = Color3.fromRGB(130,185,255)
 M.PLAIN = Color3.fromRGB(200,200,210)
+M.TEST = Color3.fromRGB(190,140,255)   -- section header for a self-test phase
 
 M.MAX_LINES = 60
 M.lines  = {}
