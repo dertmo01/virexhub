@@ -150,7 +150,80 @@ Use **Copy All** when reporting a problem — the log is what gets diagnosed fir
 
 ---
 
+## Self-test — proving it works on *your* client
+
+Nothing in a Roblox exploit can be confirmed from source alone: whether the server
+accepts a position write, whether `HoldDuration` sticks, whether the guard GUI even
+exists. So the script probes every subsystem at runtime and writes an unambiguous
+verdict to the console.
+
+**🧪 SELF-TEST (read-only, safe)** — runs automatically ~2.5s after load, and again
+from Config → Debug. Moves nothing. Checks:
+
+- environment (`loadstring`, `HttpGet`, `fireproximityprompt`, `setclipboard`)
+- character (`Humanoid`, `HumanoidRootPart`, health, position, `WalkSpeed`, team)
+- base resolution — which source was used and how far away it is
+- **`DropHeldEgg` presence and `Enabled` value** — the biggest unknown
+- every `ProximityPrompt` in `workspace` and `PlayerGui`, **and how many actually
+  have `HoldDuration = 0`** — direct proof fast click is mutating them
+- live connection state (fast-click listener, guard-watcher thread, Anti Hit toggle)
+- `isCarryingEgg()` and the resulting effective speed
+- route waypoint validity
+
+**🏃 SELF-TEST movement (moves you)** — Config → Debug. Vertical-only, so it can't
+drop you into geometry: a 3-stud hop, then an 80-stud glide that returns to the
+exact same spot. It then reports whether a direct CFrame snap holds, whether the
+glide holds, how far you drifted from origin, whether speed force applies and
+restores, and whether egg prompts are instant.
+
+Each check prints `[SELF-TEST] PASS|FAIL|WARN  name — detail` and ends with
+`SUMMARY  n PASS / n FAIL / n WARN`. A movement FAIL means the server is rejecting
+client position writes for that method — which is exactly the answer that decides
+whether to use GLIDE or TELEPORT.
+
+### Copy All
+
+**📋 Copy All** exports the whole log plus a report header:
+
+```
+===== VIREX ANTI-GUARD — LOG EXPORT =====
+time    : 2026-10-04 21:14:03
+player  : dertmo01 (123456789)
+game    : Steal an Egg
+placeId : 1234567890
+jobId   : 8f2c...
+method  : GLIDE
+antihit : true
+selftest: 14 PASS / 1 FAIL / 4 WARN
+lines   : 47
+==========================================
+```
+
+It logs its own success as the final line, so the log itself is evidence the export
+worked. If no clipboard API is reachable it says so and tells you to screenshot the
+Console tab instead.
+
+**When reporting a problem, run both self-tests then Copy All.** That single paste
+contains everything needed to diagnose it.
+
+---
+
 ## Troubleshooting
+
+**`fireproximityprompt: MISSING`**
+Not every executor exposes it. The re-fire-egg-prompt-on-return step won't work; everything else is unaffected. Fast click (`HoldDuration = 0`) is what actually drives pickup and doesn't need it.
+
+**`SELF-TEST FAIL  DropHeldEgg found in PlayerGui`**
+The guard watcher has nothing to watch, so the `ProximityPrompt` trigger is the only path. Everything else still works.
+
+**`Direct CFrame snap holds` FAILs but `BodyVelocity glide holds` PASSes**
+Expected on a server that validates positions. Keep the return method on **🪂 GLIDE**.
+
+**`TP did NOT stick — server corrected it`**
+The script falls back on its own. Nothing to do.
+
+**Anti Hit does nothing**
+Make sure the card is ON (the self-test flags `ANTI HIT toggle is OFF`), then actually interact with an egg. The self-test also reports how many prompts have `HoldDuration = 0` — if that count is 0, fast click isn't running.
 
 **`fireproximityprompt: MISSING`**
 Not every executor exposes it. The re-fire-egg-prompt-on-return step won't work; everything else is unaffected.

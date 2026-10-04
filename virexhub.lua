@@ -29,6 +29,11 @@ end
 
 local RUN = { shutdown = function() end }
 
+-- Forward-declared: the console's Copy All button builds an export header from
+-- these, but they are configured much further down. Declared here as locals so
+-- that reference resolves to the real setting instead of a nil global.
+local AntiHitEnabled, AntiHitRunning, RETURN_METHOD
+
 local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
 local HAS_LOADSTRING = (type(loadstring) == "function") or (type(load) == "function")
 
@@ -56,6 +61,7 @@ local RunService             = game:GetService("RunService")
 local TweenService           = game:GetService("TweenService")
 local SoundService           = game:GetService("SoundService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
+local MarketplaceService     = game:GetService("MarketplaceService")
 
 local Player    = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
@@ -299,6 +305,9 @@ consoleTab.Activated:Connect(function() playClick(); switchTab("Console") end)
 -- ======================================================
 -- CONSOLE LOG SYSTEM
 -- ======================================================
+-- Declared here rather than next to the self-test block further down, because
+-- the Copy All button below builds its export header from these counters.
+local SELFTEST = { pass=0, fail=0, warn=0, lines={} }
 local MAX_LOG_LINES = 60
 local logLines      = {}
 local logBuffer     = {}
@@ -375,12 +384,29 @@ clearBtn.Activated:Connect(function()
 end)
 
 copyBtn.Activated:Connect(function()
-    local text = table.concat(logBuffer, "\n")
+    local header = {
+        "===== VIREX ANTI-GUARD — LOG EXPORT =====",
+        "time    : "..os.date("%Y-%m-%d %H:%M:%S"),
+        "player  : "..tostring(Player.Name).." ("..tostring(Player.UserId)..")",
+        "game    : "..tostring(MarketplaceService:GetProductInfo(game.PlaceId).Name),
+        "placeId : "..tostring(game.PlaceId),
+        "jobId   : "..tostring(game.JobId),
+        "method  : "..tostring(RETURN_METHOD),
+        "antihit : "..tostring(AntiHitEnabled),
+        "selftest: "..SELFTEST.pass.." PASS / "..SELFTEST.fail.." FAIL / "..SELFTEST.warn.." WARN",
+        "lines   : "..#logBuffer,
+        "==========================================",
+        "",
+    }
+    local text = table.concat(header, "\n") .. table.concat(logBuffer, "\n")
     local ok   = pcall(function() setclipboard(text) end)
-    if not ok then pcall(function() syn.clipboard.set(text) end) end
-    if not ok then pcall(function() Clipboard.set(text) end) end
-    copyBtn.Text = "✓  Copied!"
-    copyBtn.TextColor3 = LOG_OK
+    if not ok then ok = pcall(function() syn.clipboard.set(text) end) end
+    if not ok then ok = pcall(function() Clipboard.set(text) end) end
+    copyBtn.Text = ok and "✓  Copied!" or "✗  No clipboard"
+    copyBtn.TextColor3 = ok and LOG_OK or LOG_ERR
+    -- logged last on purpose: this line itself proves the copy succeeded
+    log(ok and ("Copied "..#logBuffer.." log lines + report header to clipboard")
+        or "Could not reach any clipboard API — screenshot the Console tab instead", ok and LOG_OK or LOG_ERR)
     task.delay(1.5, function()
         copyBtn.Text      = "📋  Copy All"
         copyBtn.TextColor3= Color3.fromRGB(130,185,255)
@@ -670,8 +696,8 @@ end
 -- ======================================================
 -- FEATURE 1 : ANTI HIT
 -- ======================================================
-local AntiHitEnabled = false
-local AntiHitRunning = false
+AntiHitEnabled = false
+AntiHitRunning = false
 -- Forward-declared: the Anti Hit toggle below wires these up, but they are
 -- defined further down next to the guard watcher itself.
 local startGuardWatch, stopGuardWatch
@@ -767,7 +793,7 @@ setAhVisual(false)
 -- ======================================================
 -- FEATURE 2 : AUTO RUN BASE
 -- ======================================================
-local RETURN_METHOD = "GLIDE"  -- "GLIDE" | "TELEPORT" | "WALK"
+RETURN_METHOD = "GLIDE"  -- "GLIDE" | "TELEPORT" | "WALK"
 local TP_OFFSET   = 5
 local RUN_SPEED   = 300
 local ARRIVE_DIST = 30
@@ -1201,6 +1227,180 @@ ProximityPromptService.PromptTriggered:Connect(function(prompt, player)
 end)
 
 -- ======================================================
+-- SELF TEST  -- proves which parts actually work
+-- ======================================================
+-- The whole point of this block: nothing about a Roblox exploit can be
+-- confirmed from the source alone, because whether the server accepts a
+-- position change, whether HoldDuration sticks, whether the guard GUI even
+-- exists -- all of that is only knowable at runtime. So every subsystem is
+-- probed and the answer is written to the console in an unambiguous
+-- PASS / FAIL / WARN form, ending in a scored summary. Copy All then carries
+-- the evidence out of the game.
+local LOG_TEST = Color3.fromRGB(255,140,255)
+
+local function st(ok, name, detail, warnOnly)
+    local tag, col
+    if warnOnly then
+        tag = "WARN"; col = LOG_WARN; SELFTEST.warn += 1
+    elseif ok then
+        tag = "PASS"; col = LOG_OK;   SELFTEST.pass += 1
+    else
+        tag = "FAIL"; col = LOG_ERR;  SELFTEST.fail += 1
+    end
+    local line = "[SELF-TEST] "..tag.."  "..name..(detail and ("  —  "..detail) or "")
+    table.insert(SELFTEST.lines, line)
+    log(line, col)
+    return ok
+end
+
+-- Non-destructive: safe to run on load. Reports what exists and what the
+-- script can see, without moving the player.
+local function runStaticSelfTest()
+    SELFTEST.pass=0; SELFTEST.fail=0; SELFTEST.warn=0; SELFTEST.lines={}
+    log("────────── SELF-TEST (static) ──────────", LOG_TEST)
+
+    -- environment
+    st(HAS_LOADSTRING, "loadstring available", HAS_LOADSTRING and "F9 reload works" or "cannot hot-reload", true)
+    st(type(game.HttpGet)=="function", "game:HttpGet available", nil, true)
+    st(type(fireproximityprompt)=="function", "fireproximityprompt available",
+        type(fireproximityprompt)~="function" and "MISSING — re-fire egg prompt will not work" or "re-fire fallback usable", true)
+    st(type(setclipboard)=="function", "setclipboard available", nil, true)
+
+    -- character
+    local hum, root = getHumanoid(), getRoot()
+    st(hum ~= nil, "Humanoid present")
+    st(root ~= nil, "HumanoidRootPart present")
+    if hum then
+        st(hum.Health > 0, "Alive", "health="..math.floor(hum.Health))
+        st(hum.Parent ~= nil, "Humanoid parented to character")
+        log("[SELF-TEST] INFO  WalkSpeed="..tostring(hum.WalkSpeed).."  Team="..tostring(Player.Team), LOG_INFO)
+    end
+    if root then
+        log("[SELF-TEST] INFO  Position="..tostring(root.Position), LOG_INFO)
+    end
+
+    -- base resolution
+    local okBase, base = pcall(getBasePosition)
+    st(okBase, "Base position resolved", okBase and tostring(base) or "getBasePosition errored")
+    if okBase and root then
+        local d = math.floor((root.Position - base).Magnitude)
+        log("[SELF-TEST] INFO  Distance to base = "..d.." studs", LOG_INFO)
+        st(d < 3000, "Base within plausible range", d.." studs", true)
+    end
+
+    -- guard GUI -- the single most important unknown
+    local dhe = getDropHeldEgg()
+    st(dhe ~= nil, "DropHeldEgg found in PlayerGui",
+        dhe and (dhe.ClassName.." Enabled="..tostring(dhe.Enabled)) or "MISSING — guard watch cannot fire, prompt trigger is the only path")
+    if dhe then
+        log("[SELF-TEST] INFO  DropHeldEgg full path = "..dhe:GetFullName(), LOG_INFO)
+    end
+
+    -- prompts + proof that fast click is actually mutating them
+    local wsCount, pgCount, zeroed = 0, 0, 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then
+            wsCount += 1
+            if d.HoldDuration == 0 then zeroed += 1 end
+        end
+    end
+    local pg = Player:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then pgCount += 1 end
+        end
+    end
+    log("[SELF-TEST] INFO  ProximityPrompts: workspace="..wsCount.."  PlayerGui="..pgCount, LOG_INFO)
+    st(wsCount > 0, "ProximityPrompts exist in workspace", wsCount.." found", true)
+    if wsCount > 0 then
+        -- this is the real proof fast click works: the values were mutated
+        st(zeroed == wsCount, "Fast click mutated every prompt",
+            zeroed.."/"..wsCount.." have HoldDuration=0"..(zeroed<wsCount and " — sweep incomplete" or ""))
+    end
+
+    -- live connection state
+    st(_fcShownConn ~= nil, "Fast click listener connected", nil, true)
+    st(_guardThread ~= nil, "Guard watcher thread running", nil, true)
+    if AntiHitEnabled then
+        st(true, "ANTI HIT toggle is ON")
+    else
+        st(false, "ANTI HIT toggle is OFF", "dodges will not run until you enable it", true)
+    end
+
+    -- carry detection
+    local carrying = isCarryingEgg()
+    log("[SELF-TEST] INFO  isCarryingEgg() = "..tostring(carrying).."  effectiveSpeed="..effectiveSpeed().." (RUN_SPEED="..RUN_SPEED..")", LOG_INFO)
+
+    -- waypoint sanity -- hardcoded to one map, worth validating
+    local badWps = 0
+    for i, p in ipairs(ROUTE_WAYPOINTS) do
+        if p.X ~= p.X or p.Y ~= p.Y or p.Z ~= p.Z then badWps += 1 end  -- NaN check
+    end
+    st(badWps == 0, "Route waypoints valid", #ROUTE_WAYPOINTS.." points, "..badWps.." malformed")
+
+    st(RETURN_METHOD ~= nil, "Return method set", RETURN_METHOD)
+
+    log(string.format("[SELF-TEST] SUMMARY  %d PASS / %d FAIL / %d WARN", SELFTEST.pass, SELFTEST.fail, SELFTEST.warn),
+        SELFTEST.fail == 0 and LOG_OK or LOG_ERR)
+    return SELFTEST.fail
+end
+
+-- Destructive-ish: actually moves you. Vertical-only so it cannot drop you
+-- into geometry -- a 3-stud hop for the snap test, an 80-stud glide that
+-- returns to the exact same spot.
+local function runMovementSelfTest()
+    log("────────── SELF-TEST (movement) ──────────", LOG_TEST)
+    local root = getRoot()
+    if not root then st(false, "Movement test", "no HumanoidRootPart"); return end
+
+    local origin = root.Position
+
+    -- 1. does a direct CFrame snap hold at all?
+    local snapOK = tpTo(origin, 3)
+    st(snapOK, "Direct CFrame snap holds (3 studs up)",
+        snapOK and "TELEPORT method is viable" or "server corrected it — use GLIDE")
+
+    -- 2. does the glide survive?
+    local glideOK = glideTo(origin, 0)
+    st(glideOK, "BodyVelocity glide holds (80 up, snap back)",
+        glideOK and "GLIDE method is viable — recommended default" or "glide did not stick")
+
+    -- 3. did we end up back where we started?
+    task.wait(0.2)
+    local r = getRoot()
+    local drift = r and math.floor((r.Position - origin).Magnitude) or -1
+    st(drift >= 0 and drift <= 12, "Returned to origin", "drift="..drift.." studs")
+
+    -- 4. can we actually move under our own power?
+    local hum2 = getHumanoid()
+    if hum2 then
+        startSpeedForce()
+        task.wait(0.3)
+        local forced = hum2.WalkSpeed
+        stopSpeedForce()
+        local restored = hum2.WalkSpeed
+        st(math.abs(forced - effectiveSpeed()) < 1, "Speed force applied", "forced="..math.floor(forced).." target="..math.floor(effectiveSpeed()))
+        st(math.abs(restored - _originalWalkSpeed) < 1, "Speed restored on stop", "restored="..math.floor(restored), true)
+    end
+
+    -- 5. is the egg prompt actually instant?
+    if _fcShownConn ~= nil then
+        scanAllPrompts()
+        local z = 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and d.HoldDuration == 0 then z += 1 end
+        end
+        st(z > 0, "Egg prompts are instant", z.." prompts with HoldDuration=0", true)
+    end
+
+    log(string.format("[SELF-TEST] MOVEMENT DONE  %d PASS / %d FAIL / %d WARN", SELFTEST.pass, SELFTEST.fail, SELFTEST.warn),
+        SELFTEST.fail == 0 and LOG_OK or LOG_ERR)
+    if SELFTEST.fail > 0 then
+        log("Movement FAILs above mean the server is rejecting client position writes for that method.", LOG_ERR)
+    end
+end
+
+-- ======================================================
 -- CONFIG TAB
 -- ======================================================
 local function cfgLabel(text)
@@ -1333,6 +1533,26 @@ end)
 
 -- ── DEBUG ────────────────────────────────────────────
 cfgLabel("DEBUG")
+
+local selfTestBtn = cfgBtn("🧪  SELF-TEST (read-only, safe)")
+selfTestBtn.TextColor3 = LOG_TEST
+selfTestBtn.Activated:Connect(function()
+    playClick()
+    task.spawn(runStaticSelfTest)
+end)
+
+local moveTestBtn = cfgBtn("🏃  SELF-TEST movement (moves you)")
+moveTestBtn.TextColor3 = LOG_TEST
+moveTestBtn.Activated:Connect(function()
+    playClick()
+    log("=== MOVEMENT SELF-TEST: you will hop 3 studs and glide 80 ===", LOG_WARN)
+    task.spawn(function()
+        runMovementSelfTest()
+        log("Tip: Copy All now carries every PASS/FAIL line out of the game.", LOG_INFO)
+    end)
+end)
+
+cfgLabel("ACTIONS")
 local testBtn = cfgBtn("▶  Trigger Auto Run NOW (test)")
 testBtn.Activated:Connect(function()
     playClick(); log("=== MANUAL RETURN TEST ===", LOG_WARN)
@@ -1729,4 +1949,13 @@ task.delay(1, function()
         type(fireproximityprompt)=="function" and LOG_OK or LOG_ERR)
     log("Return method: "..RETURN_METHOD.."; glide falls back to TP, TP falls back to walk", LOG_INFO)
     log("Toggle ANTI HIT, then interact with an egg — route runs, then returns home", LOG_INFO)
+end)
+
+-- Read-only self-test a moment later: gives you an immediate verdict on what
+-- this client can actually do, with no clicking and nothing moved. Config also
+-- exposes 🧪 SELF-TEST to re-run it any time.
+task.delay(2.5, function()
+    runStaticSelfTest()
+    log("Config → 🏃 SELF-TEST movement will prove whether TP or GLIDE actually sticks.", LOG_INFO)
+    log("Config → 📋 Copy All exports everything above with a report header.", LOG_INFO)
 end)
