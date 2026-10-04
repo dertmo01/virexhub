@@ -174,6 +174,33 @@ function M.setClipboard(text)
     return false, table.concat(tried, " | ")
 end
 
+-- Long strings get refused or silently truncated by some of these APIs, and the
+-- report is easily 8-20KB. CHUNK is deliberately far under any plausible limit:
+-- if the clipboard will not take the whole report, it will still take a fifth
+-- of it, and the user can reassemble four button presses.
+M.CHUNK = 1600
+M.chunk = { text = "", i = 0, n = 1 }
+
+function M.chunkCount(text)
+    return math.max(1, math.ceil(#text / M.CHUNK))
+end
+
+-- Copies the next slice and reports progress. Returns false once exhausted.
+function M.copyChunk(state, step)
+    local text = M.buildReport(state)
+    M.chunk.text = text
+    M.chunk.n = M.chunkCount(text)
+    local dir = (step == "back") and -1 or 1
+    if M.chunk.i == 0 then M.chunk.i = 1
+    else M.chunk.i = math.clamp(M.chunk.i + dir, 1, M.chunk.n) end
+    local from = (M.chunk.i - 1) * M.CHUNK + 1
+    local slice = text:sub(from, from + M.CHUNK - 1)
+    local ok = M.setClipboard(slice)
+    M.write(string.format("Chunk %d/%d copied (%d chars)%s", M.chunk.i, M.chunk.n, #slice,
+        ok and "" or " - clipboard failed again"), ok and M.OK or M.ERR)
+    return ok, M.chunk.i, M.chunk.n
+end
+
 function M.copy(state, quiet)
     local text, nProblems = M.buildReport(state)
     local ok, how = M.setClipboard(text)

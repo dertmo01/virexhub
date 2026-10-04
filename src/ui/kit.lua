@@ -676,6 +676,7 @@ function M.setUIScale(v)
 end
 
 function M.applySize()
+    M.manualSize = nil
     local keepW = main.Size.X.Offset ~= 0 and main.Size.X.Offset or M.Sizes[M.sizeIndex].X.Offset
     local target = M.minimized and UDim2.fromOffset(keepW, M.HEADER_H) or M.Sizes[M.sizeIndex]
     M.tw(main,   TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = target })
@@ -683,20 +684,51 @@ function M.applySize()
     M.syncFloating()
 end
 
+-- Every piece of chrome that depends on the minimized state lives here, so it
+-- cannot get half-applied. That was the actual bug: close() hid the window
+-- without clearing M.minimized, and open() restored visibility from the stale
+-- flag, so minimizing and then closing and reopening gave back a 55px empty
+-- strip -- no sidebar, no content, no subtitle, no resize handle, and no obvious
+-- way out. The window must never come back in that state.
+function M.applyMinimizedChrome()
+    local on = M.minimized
+    M.btnMin.Text        = on and "+" or "\226\128\147"
+    subLabel.Visible     = not on
+    sidebar.Visible      = not on
+    contentArea.Visible  = not on
+    resizeHandle.Visible = not on and main.Visible
+    -- The gradient is a full-width sweep sized to the title label; collapsed it
+    -- reads as a stray smear across a 55px bar.
+    tGrad.Enabled        = not on
+end
+
+-- Size to restore to: a manual resize if the user made one, else the preset.
+function M.restoreSize()
+    return M.manualSize or M.Sizes[M.sizeIndex]
+end
+
 function M.setMinimized(on)
     M.minimized = on
-    local keepW = main.Size.X.Offset ~= 0 and main.Size.X.Offset or M.Sizes[M.sizeIndex].X.Offset
-    local target = on and UDim2.fromOffset(keepW, M.HEADER_H) or M.Sizes[M.sizeIndex]
-    M.btnMin.Text    = on and "+" or "\226\128\147"
-    subLabel.Visible    = not on
-    sidebar.Visible     = not on
-    contentArea.Visible = not on
-    -- RESZ on a 55px title bar makes no sense; dragHandle stays so the
-    -- minimised bar can still be moved. The same button restores, so the
-    -- window can never be lost off-screen.
-    resizeHandle.Visible = not on
+    M.applyMinimizedChrome()
+    local target = on and UDim2.fromOffset(main.Size.X.Offset ~= 0 and main.Size.X.Offset
+                                                or M.restoreSize().X.Offset, M.HEADER_H)
+                    or M.restoreSize()
     M.tw(main,   TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = target })
     M.tw(shadow, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = target })
+    -- Without this the shadow and handles stay where the old height put them,
+    -- so the window appeared to shrink but its shadow did not.
+    task.delay(0.18, function() if M.minimized == on then M.syncFloating() end end)
+end
+
+-- Collapse to a clean title bar without animating, for the reopen path.
+function M.forceExpanded()
+    if not M.minimized then return end
+    M.minimized = false
+    M.manualSize = nil
+    M.applyMinimizedChrome()
+    main.Size   = M.restoreSize()
+    shadow.Size = M.restoreSize()
+    M.syncFloating()
 end
 
 M.btnMin.Activated:Connect(function() M.playClick(); M.setMinimized(not M.minimized) end)
@@ -740,6 +772,9 @@ UIS.InputChanged:Connect(function(i)
         local h = math.clamp(RESZ.s.Y.Offset + d.Y * 2, 260, 620)
         main.Size   = UDim2.fromOffset(w, h)
         shadow.Size = UDim2.fromOffset(w, h)
+        -- Remember it. Minimising and restoring used to snap back to the
+        -- GUI-size preset, silently discarding a resize the user had made.
+        M.manualSize = UDim2.fromOffset(w, h)
     end
     if VXD.on and openBtn then
         local d = i.Position - VXD.s
@@ -799,11 +834,15 @@ openBtn.InputBegan:Connect(function(i)
 end)
 
 function M.open()
+    -- If the window was minimized when it was closed, expand it properly before
+    -- showing it. This is the guarantee the user asked for: the window comes
+    -- back looking like a window, never like a minimized bar.
+    M.forceExpanded()
     openBtn.Visible = false
     main.Visible = true
     shadow.Visible = true
     dragHandle.Visible = true
-    resizeHandle.Visible = not M.minimized
+    M.applyMinimizedChrome()
     main.BackgroundTransparency = 0
     shadow.BackgroundTransparency = 0.45
     mainUIScale.Scale = 0.80
@@ -813,6 +852,11 @@ function M.open()
 end
 
 function M.close()
+    -- Clear the minimized state on the way out. Otherwise reopening restored
+    -- visibility from a stale M.minimized=true and the window came back as an
+    -- empty collapsed strip.
+    M.minimized = false
+    M.applyMinimizedChrome()
     main.Visible = false
     shadow.Visible = false
     dragHandle.Visible = false

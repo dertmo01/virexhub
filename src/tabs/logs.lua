@@ -33,52 +33,94 @@ function M.build(parent)
         }
     end
 
-    local _, btns = ui.segRow(parent, {"copy", "clear"}, {"\240\159\147\147  COPY ALL", "\240\159\147\161  CLEAR"},
-        nextO(), function(which)
-            if which == "clear" then mods.log.clear() else mods.log.copy(state) end
-        end)
+    -- The manual box, created on first use. Kept in a closure so every entry
+    -- point below can reach it -- the bug was that COPY ALL failed and left the
+    -- text nowhere, because the fallback only existed on a second button the
+    -- user had to know about.
+    local manualText, manualInfo
 
-    -- Manual copy. Every clipboard API on Roblox can be blocked or silently
-    -- no-op depending on the executor, and when that happens COPY ALL used to
-    -- leave the user with nothing and no way out. This puts the export in a
-    -- selectable box, which only needs the platform's own copy gesture.
-    local manualText
-    ui.button(parent, "\240\159\147\137  COPY MANUAL (if COPY ALL did nothing)", nextO()).Activated:Connect(function()
-        ui.playClick()
-        local ok, text = mods.log.copy(state, true)
+    local function showManual(text)
+        text = text or ""
         if not manualText then
             manualText = Instance.new("TextBox")
-            manualText.MultiLine            = true
-            manualText.Selectable            = true
-            manualText.TextEditable          = false
-            manualText.ClearTextOnFocus      = false
-            manualText.BackgroundColor3      = Color3.fromRGB(18, 18, 24)
-            manualText.BorderSizePixel       = 0
-            manualText.TextColor3            = Color3.new(0.85, 0.87, 0.92)
-            manualText.Font                  = Enum.Font.Code
-            manualText.TextSize              = 11
-            manualText.TextXAlignment        = Enum.TextXAlignment.Left
-            manualText.TextYAlignment        = Enum.TextYAlignment.Top
-            manualText.Size                  = UDim2.new(1, -8, 0, 260)
-            manualText.LayoutOrder           = nextO()
-            manualText.AutomaticSize         = Enum.AutomaticSize.None
-            manualText.Parent                = parent
+            manualText.Name = "ExportBox"
+            manualText.MultiLine       = true
+            manualText.Selectable       = true
+            manualText.TextEditable     = false
+            manualText.ClearTextOnFocus = false
+            manualText.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+            manualText.BorderSizePixel  = 0
+            manualText.TextColor3       = Color3.fromRGB(0.86, 0.88, 0.93)
+            manualText.Font             = Enum.Font.Code
+            manualText.TextSize         = 11
+            manualText.TextXAlignment   = Enum.TextXAlignment.Left
+            manualText.TextYAlignment   = Enum.TextYAlignment.Top
+            -- A TextBox with no Size is 0x0 and invisible, which is what made an
+            -- earlier version of this look like it had produced nothing.
+            manualText.Size        = UDim2.new(1, -8, 0, 300)
+            manualText.AutomaticSize = Enum.AutomaticSize.None
+            manualText.LayoutOrder = 900
+            manualText.Parent      = parent
             Instance.new("UICorner", manualText).CornerRadius = UDim.new(0, 6)
             local pad = Instance.new("UIPadding", manualText)
-            pad.PaddingTop = UDim.new(0, 6); pad.PaddingLeft = UDim.new(0, 8)
-            manualText.Size = UDim2.new(1, -8, 0, 260)
+            pad.PaddingTop   = UDim.new(0, 8)
+            pad.PaddingLeft  = UDim.new(0, 8)
+            pad.PaddingRight = UDim.new(0, 8)
+
+            manualInfo = Instance.new("TextLabel")
+            manualInfo.BackgroundTransparency = 1
+            manualInfo.Font           = Enum.Font.FredokaOne
+            manualInfo.TextSize       = 12
+            manualInfo.TextColor3     = Color3.fromRGB(255, 200, 60)
+            manualInfo.TextXAlignment = Enum.TextXAlignment.Left
+            manualInfo.TextWrapped    = true
+            manualInfo.Size           = UDim2.new(1, -8, 0, 46)
+            manualInfo.AutomaticSize  = Enum.AutomaticSize.Y
+            manualInfo.LayoutOrder    = 901
+            manualInfo.Parent         = parent
         end
         manualText.Visible = true
-        manualText.Text = text or "no text"
-        manualText.LayoutOrder = nextO()
-        mods.log.write(ok and "Clipboard worked; the same text is also below."
-                             or "Clipboard unavailable -- long-press the box and choose Copy.", mods.log.WARN)
+        manualText.Text    = text
+        local _, nl = string.gsub(text, "\n", "")
+        manualInfo.Text = string.format(
+            "%d chars, %d lines, needs %d copy press(es). Long-press the box " ..
+            "and choose Copy, or use COPY IN PARTS.", #text, nl + 1,
+            mods.log.chunkCount(text))
+    end
+
+    local _, btns = ui.segRow(parent, {"copy", "clear"}, {"\240\159\147\147  COPY ALL", "\240\159\147\161  CLEAR"},
+        nextO(), function(which)
+            if which == "clear" then
+                mods.log.clear()
+            else
+                local ok, text = mods.log.copy(state)
+                if not ok then
+                    -- Show the text anyway. Never let a clipboard failure leave
+                    -- the user with nothing.
+                    showManual(text)
+                end
+            end
+        end)
+
+    ui.button(parent, "\240\159\147\137  SHOW EXPORT BOX", nextO()).Activated:Connect(function()
+        ui.playClick()
+        local _, text = mods.log.copy(state, true)
+        showManual(text)
+    end)
+    ui.button(parent, "\240\159\147\137  COPY IN PARTS (if it will not copy whole)", nextO()).Activated:Connect(function()
+        ui.playClick()
+        mods.log.copyChunk(state, "next")
+    end)
+    ui.button(parent, "\240\159\147\140  back one part", nextO()).Activated:Connect(function()
+        ui.playClick()
+        mods.log.copyChunk(state, "back")
     end)
 
     ui.note(parent,
         "COPY ALL puts a summary header on the clipboard first -- settings, " ..
         "self-test score, and every FAIL/WARN -- then the full log. Paste " ..
-        "that into the bug report; it is what the next fix is based on.", nextO())
+        "that into the bug report; it is what the next fix is based on. If the " ..
+        "clipboard refuses it, the export opens in a box you can copy by hand.", nextO())
 
     -- ── what the GAME is doing, not what we intended ────────────────
     ui.label(parent, "WHAT THE GAME IS DOING", nextO())

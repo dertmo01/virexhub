@@ -90,6 +90,7 @@ could not download and shows the exact URL it tried.
 | Resize window | Drag the `↘` handle at the bottom-right (320x260 → 760x620) |
 | Minimize | `–` in the title bar — collapses in place to just the bar |
 | Restore | `+` in the title bar (same button) |
+| Manual resize is kept | Drag `↘` to resize, then minimize and restore — it keeps your size |
 | Close | `×` top-right |
 | Reopen | The `VX` circle (drag it anywhere) |
 | Reload script | `F9` |
@@ -212,6 +213,11 @@ means it can fill most of the display.
 
 Every decision the script makes is logged with a timestamp and colour.
 **COPY ALL** and **CLEAR** are at the top.
+
+If **COPY ALL** cannot reach a clipboard (some executors block every API), it
+opens the export in a box instead: long-press it and choose Copy. If the report
+is too long for one copy, **COPY IN PARTS** walks it through 1600-character
+slices and tells you how many there are.
 
 Use **COPY ALL** when reporting a problem. It puts a summary header on the
 clipboard first — your settings, the self-test score, and every FAIL/WARN — and
