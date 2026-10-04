@@ -279,3 +279,58 @@ There is a 3-second cooldown between dodges, and after landing at base with an
 egg the script holds perfectly still for up to 6 seconds so the deposit can
 commit. Moving during that window is what caused "the egg was delivered but
 never appeared in the bag".
+
+
+## Transport: FLOW (frame-stepped)
+
+The default return method is `FLOW`, ported from the `stealvip2` reference's
+`TeleportSystem`. It does not teleport and does not hop on a timer — it writes
+the CFrame **once per frame**, advancing by `speed / 60` studs each frame:
+
+```lua
+RunService.Heartbeat:Connect(function()
+    local MoveStep = Dir.Unit * PlayerSpeed * (1/60)
+    Root2.CFrame = CFrame.new(CurrentPos + MoveStep)
+end)
+```
+
+This is what "lowering tween speed" actually means, and it explains every
+measurement taken from the live exports. Hops of 35 studs every 0.06s work out
+to 583 studs/sec, which is far faster than the server's authoritative copy can
+replicate — so it falls behind and eventually snaps you back. That was the
+`corrected hop 6` / `corrected hop 12` pattern.
+
+`FLOW` adapts at runtime rather than using a guessed constant: if a write is
+corrected it slows by 0.55x (floor 40 studs/sec), and after 45 clean frames it
+speeds back up by 1.15x (ceiling 600). The server sets the pace. The log line
+reports how far it had to back off:
+
+```
+AutoRun: ARRIVED at base (flow: 1786 studs in 9.4s (564 frames, backed off to 88))
+```
+
+## Egg rarity and Auto Fetch
+
+Rarity is read out of the game's own config modules, because eggs carry no
+readable rarity of their own. The chain, from the `stealvip2` reference:
+
+1. Eggs live in `workspace.AreaEggSlotsClient`, each Model named by uid.
+2. A `MeshPart`/`SpecialMesh` `.MeshId` inside the egg maps to a category under
+   `ReplicatedStorage.Data.Assets.Configs`.
+3. `require()` that category gives `Rarity._id`, `EarningRate`, `DisplayName`.
+
+Rarities are `Divine Eternal Secret Mythic Legendary Epic Rare Uncommon Common`,
+and a `Divine` egg is always chosen over a `Legendary` no matter the distance.
+
+**Auto Fetch** is opt-in — `Config → AUTO FETCH → START`. It finds the best
+allowed egg, flows to it, fires the prompt, returns to base and repeats. `RARITY`
+cycles the filter. Nothing about it is invented: it only uses signals verified
+in a live export.
+
+## Anti-death (Humanoid replacement)
+
+Ported from the reference's `BypassAntiCheat`. The `Humanoid` is cloned, its
+children moved across, and the original destroyed — which severs any server-side
+connection bound to the old instance. That is the likely reason this game can
+clamp `WalkSpeed` to 264 every frame. Re-applied on `CharacterAdded` and on
+death, as the reference does.

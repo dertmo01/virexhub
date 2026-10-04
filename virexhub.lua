@@ -33,7 +33,7 @@ local RUN = { shutdown = function() end }
 -- these, but they are configured much further down. Declared here as locals so
 -- that reference resolves to the real setting instead of a nil global.
 local AntiHitEnabled, AntiHitRunning, RETURN_METHOD
-local HOP_WORKS, SNAP_WORKS
+local HOP_WORKS, SNAP_WORKS, FLOW_WORKS
 local BASE_OVERRIDE, BASE_LABEL, GUARD_SAFE_ZONE, BASE_CACHED
 
 local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
@@ -532,6 +532,116 @@ local function fireEggPrompt(prompt)
     return false
 end
 
+-- ── FLOW TP ────────────────────────────────────────────────────
+-- Ported from the stealvip2 reference (Features/TeleportSystem.lua FlyTo).
+-- This replaces fixed-interval hopping and is the single biggest fix so far.
+--
+-- The reference does NOT teleport and does NOT hop on a timer. It writes the
+-- CFrame once per Heartbeat, advancing by speed/60 studs each frame:
+--
+--   State.FlyConnection = RunService.Heartbeat:Connect(function()
+--       local MoveStep = Dir.Unit * PlayerSpeed * (1/60)
+--       Root2.CFrame = CFrame.new(CurrentPos + MoveStep)
+--       Root2.AssemblyLinearVelocity  = Vector3.zero
+--       Root2.AssemblyAngularVelocity = Vector3.zero
+--
+-- That is what "lowering tween speed" in that hub's changelog actually means,
+-- and it explains every observation in my logs. My HOP_SETTLE of 0.06s with
+-- 35-stud hops was an effective 583 studs/sec, so the server's authoritative
+-- copy fell progressively further behind the client and eventually snapped us
+-- back -- which is precisely the "corrected hop 6 / hop 12" pattern. Frame-rate
+-- stepping at a controlled speed keeps the server's copy in step with ours.
+--
+-- FLOW_SPEED is adapted at runtime: if the server corrects us we slow down,
+-- if a run of frames goes clean we speed back up. So the server, not a guess,
+-- sets the pace.
+local FLOW_SPEED      = 300  -- studs/sec we aim for
+local FLOW_SPEED_MIN  = 40   -- slowest we will crawl to stay under the limiter
+local FLOW_SPEED_MAX  = 600  -- fastest we will ever try
+local FLOW_ARRIVE     = 3    -- within this many studs, land it exactly
+local FLOW_TIMEOUT    = 25   -- give up rather than walk forever
+local FLOW_SLOW_STREAK = 45  -- clean frames needed before speeding back up
+
+local function flowTp(position, offsetY, label)
+    local dest = position + Vector3.new(0, offsetY or 0, 0)
+    local root = getRoot()
+    if not root then return false, "no root" end
+
+    local speed    = FLOW_SPEED
+    local clean    = 0
+    local t0       = os.clock()
+    local frames   = 0
+    local slowest  = FLOW_SPEED
+    local conn
+
+    conn = RunService.Heartbeat:Connect(function()
+        local r  = getRoot()
+        local hu = getHumanoid()
+        if not r or not hu or hu.Health <= 0 then
+            conn:Disconnect()
+            return
+        end
+
+        local dir  = dest - r.Position
+        local dist = dir.Magnitude
+        frames += 1
+
+        if dist <= FLOW_ARRIVE then
+            pcall(function()
+                r.CFrame = CFrame.new(dest)
+                r.AssemblyLinearVelocity  = Vector3.zero
+                r.AssemblyAngularVelocity = Vector3.zero
+            end)
+            conn:Disconnect()
+            return
+        end
+        if os.clock() - t0 > FLOW_TIMEOUT then
+            conn:Disconnect()
+            return
+        end
+
+        local step = dir.Unit * speed * (1/60)
+        local want = r.Position + step
+        pcall(function()
+            r.CFrame = CFrame.new(want)
+            r.AssemblyLinearVelocity  = Vector3.zero
+            r.AssemblyAngularVelocity = Vector3.zero
+        end)
+
+        -- Did the write survive? Compare where we aimed against where we ended
+        -- up on the next frame's read of our own position.
+        local r2 = getRoot()
+        if r2 then
+            local drift = (r2.Position - want).Magnitude
+            if drift > 6 then
+                -- corrected: back off hard, this is the signal we were waiting for
+                speed   = math.max(speed * 0.55, FLOW_SPEED_MIN)
+                clean   = 0
+                slowest = math.min(slowest, speed)
+            else
+                clean += 1
+                if clean >= FLOW_SLOW_STREAK then
+                    clean = 0
+                    speed = math.min(speed * 1.15, FLOW_SPEED_MAX)
+                end
+            end
+        end
+    end)
+
+    -- block until the connection finishes, so callers can sequence on it
+    while conn.Connected do task.wait(0.05) end
+
+    local r = getRoot()
+    if not r then return false, "lost root" end
+    local final = (r.Position - dest).Magnitude
+    if final <= FLOW_ARRIVE then
+        return true, string.format("%s: %.0f studs in %.1fs (%d frames%s)",
+            label or "flow", dest.Magnitude, os.clock() - t0, frames,
+            slowest < FLOW_SPEED - 1 and (", backed off to "..math.floor(slowest)) or "")
+    end
+    return false, string.format("%s: gave up %d studs short after %.1fs", label or "flow", math.floor(final), os.clock() - t0)
+end
+
 -- ── HOP TP ────────────────────────────────────────────
 -- THE fix for this server, derived from the live logs:
 --   ARRIVED at base (TP)  succeeded over  ~37 studs
@@ -623,6 +733,144 @@ local function hopTp(position, offsetY)
             settle = math.max(settle * HOP_RELAX, HOP_SETTLE_MIN)
         end
     end
+end
+
+local EGG = {cache = {mesh = {}, built = false, data = {}, uid = {}}}
+-- ── EGG RARITY ─────────────────────────────────────────────────
+-- Ported from stealvip2's Features/FarmingManager.lua, which resolves rarity the
+-- only way that actually works: eggs carry no readable rarity themselves. The
+-- chain is
+--   workspace.AreaEggSlotsClient  -> egg Model (Name = uid)
+--   -> any MeshPart/SpecialMesh .MeshId inside it
+--   -> that MeshId maps to a category under ReplicatedStorage.Data.Assets.Configs
+--   -> require(category) gives Module.Rarity._id, .EarningRate, .DisplayName
+-- So rarity is read out of the game's own config modules, not guessed from names
+-- or colours.
+EGG.priority = {
+    Divine = 1, Eternal = 2, Secret = 3, Mythic = 3, Legendary = 4,
+    Epic = 5, Rare = 5, Uncommon = 5, Common = 5,
+}
+EGG.list = {"Divine","Eternal","Secret","Mythic","Legendary","Epic","Rare","Uncommon","Common"}
+-- Default to the top five, matching the reference's default. Anything not in
+-- here is treated as unwanted, so an unknown rarity is skipped rather than
+-- grabbed by accident.
+EGG.wanted = {
+    Divine = true, Eternal = true, Secret = true, Mythic = true, Legendary = true,
+}
+
+function EGG.buildMeshMap()
+    if EGG.cache.built then return end
+    EGG.cache.built = true
+    local assets = ReplicatedStorage:FindFirstChild("Data")
+    assets = assets and assets:FindFirstChild("Assets")
+    local configs = assets and assets:FindFirstChild("Configs")
+    if not configs then
+        log("Egg rarity: ReplicatedStorage.Data.Assets.Configs not found", LOG_WARN)
+        return
+    end
+    local n = 0
+    for _, cfg in ipairs(configs:GetChildren()) do
+        for _, d in ipairs(cfg:GetDescendants()) do
+            local mid
+            if d:IsA("SpecialMesh") then mid = d.MeshId
+            elseif d:IsA("MeshPart") then mid = d.MeshId end
+            if mid and mid ~= "" then
+                EGG.cache.mesh[mid] = cfg.Name
+                n += 1
+            end
+        end
+    end
+    log("Egg rarity: indexed "..n.." mesh ids across "..#configs:GetChildren().." configs", LOG_INFO)
+end
+
+function EGG.getData(category)
+    if EGG.cache.data[category] ~= nil then
+        local d = EGG.cache.data[category]
+        if d == false then return nil end
+        return d
+    end
+    local assets = ReplicatedStorage:FindFirstChild("Data")
+    assets = assets and assets:FindFirstChild("Assets")
+    local configs = assets and assets:FindFirstChild("Configs")
+    local cfg = configs and configs:FindFirstChild(category)
+    if not cfg then EGG.cache.data[category] = false; return nil end
+    local ok, mod = pcall(require, cfg)
+    if not ok or type(mod) ~= "table" then EGG.cache.data[category] = false; return nil end
+    local rar = nil
+    if type(mod.Rarity) == "table" then rar = mod.Rarity._id or mod.Rarity.RarityId
+    elseif type(mod.Rarity) == "string" then rar = mod.Rarity end
+    local d = {
+        Rarity = rar,
+        EarningRate = tonumber(mod.EarningRate) or 0,
+        DisplayName = mod.DisplayName or category,
+    }
+    EGG.cache.data[category] = d
+    return d
+end
+
+function EGG.classify(model)
+    if not model then return nil end
+    local uid = model.Name
+    if EGG.cache.uid[uid] ~= nil then
+        local c = EGG.cache.uid[uid]
+        return c and EGG.getData(c) or nil
+    end
+    EGG.buildMeshMap()
+    local category
+    for _, d in ipairs(model:GetDescendants()) do
+        local mid
+        if d:IsA("SpecialMesh") then mid = d.MeshId
+        elseif d:IsA("MeshPart") then mid = d.MeshId end
+        if mid and mid ~= "" then
+            category = EGG.cache.mesh[mid]
+            if category then break end
+        end
+    end
+    EGG.cache.uid[uid] = category or false
+    return category and EGG.getData(category) or nil
+end
+
+function EGG.isPlayerModel(obj)
+    if not obj then return false end
+    if obj:FindFirstChildOfClass("Humanoid") then return true end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character == obj or p.Name == obj.Name then return true end
+    end
+    return false
+end
+
+-- Find the best wanted egg. Rarity first, then earning rate, then distance, so
+-- a Divine 500 studs away still beats a Legendary that is underfoot -- which is
+-- the reference's "Divine Priority" rule and the reason it can farm at all.
+function EGG.findBest(maxDistance)
+    local root = getRoot()
+    if not root then return nil end
+    local container = workspace:FindFirstChild("AreaEggSlotsClient")
+    if not container then return nil end
+    local best, bestScore
+    for _, slot in ipairs(container:GetChildren()) do
+        if slot:IsA("Model") and not EGG.isPlayerModel(slot)
+           and not string.find(slot.Name, "FirstAreaEgg", 1, true)
+           and slot:FindFirstChildWhichIsA("BasePart") then
+            local data = classifyEgg(slot)
+            if data and data.Rarity and EGG.wanted[data.Rarity] then
+                local part = slot:FindFirstChildWhichIsA("BasePart")
+                local dist = part and (part.Position - root.Position).Magnitude or math.huge
+                if dist <= (maxDistance or 3000) then
+                    local score = EGG.priority[data.Rarity] * 1e6 - data.EarningRate - dist * 0.01
+                    if not bestScore or score < bestScore then
+                        bestScore = score
+                        best = {
+                            model = slot, uid = slot.Name, rarity = data.Rarity,
+                            earning = data.EarningRate, name = data.DisplayName,
+                            dist = dist, position = part and part.Position,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    return best
 end
 
 -- ======================================================
@@ -1054,7 +1302,7 @@ setAhVisual(false)
 -- ======================================================
 -- FEATURE 2 : AUTO RUN BASE
 -- ======================================================
-RETURN_METHOD = "HOP"  -- "HOP" | "TELEPORT" | "GLIDE" | "WALK"
+RETURN_METHOD = "FLOW"  -- "FLOW" | "HOP" | "TELEPORT" | "GLIDE" | "WALK"
 local TP_OFFSET   = 5
 local RUN_SPEED   = 300
 local ARRIVE_DIST = 30
@@ -1246,7 +1494,19 @@ local function startAutoRun()
         -- GLIDE first: BodyVelocity + late CFrame snap. This is the only one
         -- that survives server-side position validation, because the bulk of
         -- the move is ordinary physics replication rather than one huge jump.
-        if method == "HOP" then
+        if method == "FLOW" then
+            setArVisual("running","Flowing to base...")
+            local flowOK, info = flowTp(target, TP_OFFSET, "flow")
+            if flowOK then
+                log("AutoRun: ARRIVED at base ("..tostring(info)..")", LOG_OK)
+                arrived = true
+            else
+                log("AutoRun: flow failed ("..tostring(info)..") - trying hops", LOG_WARN)
+                method = "HOP"
+            end
+        end
+
+        if not arrived and method == "HOP" then
             setArVisual("running","Hopping to base...")
             local hopOK, info = hopTp(target, TP_OFFSET)
             if hopOK then
@@ -1727,19 +1987,35 @@ local function runMovementSelfTest()
     -- short enough to stay under the limit.
     local far = origin + Vector3.new(180, 0, 0)
 
-    -- 1. multi-hop TP over a long distance -- the method that should win
+    -- Each probe starts from the origin, so a failure can't silently become a
+    -- no-op for the next one. Previously flowTp landed on `far` and then the
+    -- hop probe measured a distance of zero and reported a free pass.
+    local function goHome()
+        pcall(function()
+            local rr = getRoot()
+            if rr then
+                rr.CFrame = CFrame.new(origin)
+                rr.AssemblyLinearVelocity  = Vector3.zero
+                rr.AssemblyAngularVelocity = Vector3.zero
+            end
+        end)
+        task.wait(0.35)
+    end
+
+    -- 0. frame-stepped flow over a long distance -- this is the one that should
+    -- win. Ported from stealvip2's TeleportSystem, which is how that hub moves
+    -- a character across the map without tripping the anti-teleport check.
+    local flowOK, flowInfo = flowTp(far, 0, "probe")
+    FLOW_WORKS = flowOK
+    st(flowOK, "Frame-stepped flow reaches 180 studs", flowInfo)
+    goHome()
+
+    -- 1. multi-hop TP over a long distance -- fallback
     local hopOK, hopInfo = hopTp(far, 0)
     HOP_WORKS = hopOK
     st(hopOK, "Multi-hop TP holds over 180 studs",
         hopOK and ("landed in "..tostring(hopInfo).." hops") or ("failed: "..tostring(hopInfo)))
-    if hopOK then
-        -- come back the same way
-        local back = getRoot() and hopTp(origin, 0)
-        st(back, "Multi-hop TP returns home", nil)
-    else
-        -- hop failed, so put ourselves back with one plain snap if we can
-        pcall(function() getRoot().CFrame = CFrame.new(origin) end)
-    end
+    goHome()
 
     -- 2. does a single direct CFrame snap hold at all?
     local snapOK = tpTo(origin, 3)
@@ -1764,14 +2040,14 @@ local function runMovementSelfTest()
     end)
     task.wait(0.35)
 
-    -- 4. did we end up back where we started?
+    -- did we end up back where we started?
     task.wait(0.2)
     local r = getRoot()
     local drift = (r and (r.Position - origin).Magnitude) or -1
     if drift ~= drift then drift = -1 end   -- NaN guard
     st(drift >= 0 and drift <= 20, "Returned to origin", "drift="..math.floor(drift).." studs")
 
-    -- 4. can we actually move under our own power?
+    -- can we actually move under our own power?
     local hum2 = getHumanoid()
     if hum2 then
         startSpeedForce()
@@ -1809,6 +2085,100 @@ local function runMovementSelfTest()
 end
 
 -- ======================================================
+-- ── AUTO FETCH ─────────────────────────────────────────────────
+-- Opt-in. Finds the best egg by rarity, flows to it, takes it, returns to base,
+-- repeats. Every signal it relies on has been verified in a live export:
+--   EGG.classify()  -> workspace.AreaEggSlotsClient + Data.Assets.Configs
+--   flowTp()        -> frame-stepped movement that survives position validation
+--   fireEggPrompt() -> HoldDuration is already 0, so the prompt is instant
+-- It does NOT invent RemoteEvent names, because a wrong guess silently no-ops
+-- and we would never learn whether the feature worked.
+local FETCH = {on = false, thread = nil, got = 0, tried = 0, lastUid = nil}
+
+function FETCH.setRarity(r, want)
+    if EGG.wanted[r] == want then return end
+    EGG.wanted[r] = want
+    local names = {}
+    for _, n in ipairs(EGG.list) do if EGG.wanted[n] then table.insert(names, n) end end
+    log("Fetch rarity filter: "..(#names > 0 and table.concat(names, ", ") or "nothing selected"), LOG_INFO)
+end
+
+function FETCH.cycleRarity()
+    FETCH.rIdx = ((FETCH.rIdx or 5) % #EGG.list) + 1
+    local nextR = EGG.list[FETCH.rIdx]
+    for _, n in ipairs(EGG.list) do EGG.wanted[n] = (n == nextR) end
+    log("Fetch rarity filter: "..nextR.." only", LOG_INFO)
+    return nextR
+end
+
+function FETCH.stop(reason)
+    FETCH.on = false
+    if FETCH.thread then
+        pcall(function() task.cancel(FETCH.thread) end)
+        FETCH.thread = nil
+    end
+    log("Auto Fetch stopped"..(reason and (" - "..reason) or ""), LOG_INFO)
+end
+
+function FETCH.run()
+    FETCH.thread = task.spawn(function()
+        log("Auto Fetch ON - looking for the rarest egg you allow", LOG_OK)
+        local idle = 0
+        while FETCH.on do
+            local egg = EGG.findBest(4000)
+            if not egg then
+                idle += 1
+                if idle % 4 == 1 then
+                    log("Auto Fetch: no egg matches your rarity filter", LOG_INFO)
+                end
+                task.wait(1.5)
+            else
+                idle = 0
+                if egg.uid ~= FETCH.lastUid then
+                    FETCH.tried += 1
+                    log(string.format("Auto Fetch: target #%d %s (%s, %d/s, %d studs away)",
+                        FETCH.tried, egg.name, egg.rarity, math.floor(egg.earning), math.floor(egg.dist)),
+                        LOG_INFO)
+                    FETCH.lastUid = egg.uid
+                end
+                -- go to it
+                local ok, info = flowTp(egg.position, 6, "to egg")
+                if not ok then
+                    log("Auto Fetch: could not reach it ("..tostring(info)..")", LOG_WARN)
+                    FETCH.lastUid = nil
+                    task.wait(1)
+                else
+                    -- take it
+                    local prompt = CurrentEggPrompt
+                    if prompt and fireEggPrompt(prompt) then
+                        task.wait(0.6)
+                        if isCarryingEgg() then
+                            FETCH.got += 1
+                            log("Auto Fetch: grabbed "..egg.rarity.." egg ("..FETCH.got.." this session)", LOG_OK)
+                            -- straight home so the deposit commits
+                            local bok, binfo = flowTp(getBasePosition(), TP_OFFSET, "home")
+                            if bok then
+                                _depositUntil = os.clock() + DEPOSIT_LOCKOUT
+                                log("Auto Fetch: back at base ("..binfo..") - depositing", LOG_OK)
+                            else
+                                log("Auto Fetch: return failed ("..tostring(binfo)..")", LOG_WARN)
+                            end
+                            FETCH.lastUid = nil
+                        else
+                            log("Auto Fetch: prompt fired but not carrying - someone else took it", LOG_WARN)
+                            FETCH.lastUid = nil
+                        end
+                    else
+                        log("Auto Fetch: no live prompt at that egg", LOG_INFO)
+                        FETCH.lastUid = nil
+                    end
+                end
+                task.wait(0.5)
+            end
+        end
+    end)
+end
+
 -- CONFIG TAB
 -- ======================================================
 local function cfgLabel(text)
@@ -1891,33 +2261,34 @@ end
 cfgLabel("RETURN TO BASE")
 local retRow=Instance.new("Frame"); retRow.Size=UDim2.new(1,-8,0,40)
 retRow.BackgroundTransparency=1; retRow.Parent=configPage
-local retHop   = segBtn(retRow, 0.25, 0,    "🔗 HOP")
-local retTP    = segBtn(retRow, 0.25, 0.25, "⚡ TP")
-local retGlide = segBtn(retRow, 0.25, 0.50, "🪂 GLIDE")
-local retWalk  = segBtn(retRow, 0.25, 0.75, "🚶 WALK")
+local RET = {}
+RET.flow  = segBtn(retRow, 0.20, 0,    "🌊 FLOW")
+RET.hop   = segBtn(retRow, 0.20, 0.20, "🔗 HOP")
+RET.tp    = segBtn(retRow, 0.20, 0.40, "⚡ TP")
+RET.glide = segBtn(retRow, 0.20, 0.60, "🪂 GLIDE")
+RET.walk  = segBtn(retRow, 0.20, 0.80, "🚶 WALK")
 local function refreshRetButtons()
     local on = Color3.fromRGB(35,120,200)
-    retHop.BackgroundColor3   = (RETURN_METHOD == "HOP")      and on or Themes[1].Panel
-    retTP.BackgroundColor3    = (RETURN_METHOD == "TELEPORT") and on or Themes[1].Panel
-    retGlide.BackgroundColor3 = (RETURN_METHOD == "GLIDE")    and on or Themes[1].Panel
-    retWalk.BackgroundColor3  = (RETURN_METHOD == "WALK")     and on or Themes[1].Panel
+    RET.flow.BackgroundColor3  = (RETURN_METHOD == "FLOW")     and on or Themes[1].Panel
+    RET.hop.BackgroundColor3   = (RETURN_METHOD == "HOP")      and on or Themes[1].Panel
+    RET.tp.BackgroundColor3    = (RETURN_METHOD == "TELEPORT") and on or Themes[1].Panel
+    RET.glide.BackgroundColor3 = (RETURN_METHOD == "GLIDE")    and on or Themes[1].Panel
+    RET.walk.BackgroundColor3  = (RETURN_METHOD == "WALK")     and on or Themes[1].Panel
 end
-retHop.Activated:Connect(function()
-    playClick(); RETURN_METHOD = "HOP"; refreshRetButtons()
-    log("Return method = HOP (35-stud verified hops)", LOG_INFO)
-end)
-retGlide.Activated:Connect(function()
-    playClick(); RETURN_METHOD = "GLIDE"; refreshRetButtons()
-    log("Return method = GLIDE (BodyVelocity + late CFrame snap, hardest to detect)", LOG_INFO)
-end)
-retTP.Activated:Connect(function()
-    playClick(); RETURN_METHOD = "TELEPORT"; refreshRetButtons()
-    log("Return method = TELEPORT (direct CFrame snap, self-verifying)", LOG_INFO)
-end)
-retWalk.Activated:Connect(function()
-    playClick(); RETURN_METHOD = "WALK"; refreshRetButtons()
-    log("Return method = WALK", LOG_INFO)
-end)
+local RET_LABEL = {
+    FLOW = "FLOW (frame-stepped, adapts to the server's tolerance - fastest)",
+    HOP  = "HOP (35-stud verified hops)",
+    TELEPORT = "TELEPORT (direct CFrame snap, only good for short hops)",
+    GLIDE = "GLIDE (BodyVelocity + late CFrame snap)",
+    WALK = "WALK (no position writes at all)",
+}
+for _, key in ipairs({"flow","hop","tp","glide","walk"}) do
+    local want = ({flow="FLOW", hop="HOP", tp="TELEPORT", glide="GLIDE", walk="WALK"})[key]
+    RET[key].Activated:Connect(function()
+        playClick(); RETURN_METHOD = want; refreshRetButtons()
+        log("Return method = "..(RET_LABEL[want] or want), LOG_INFO)
+    end)
+end
 refreshRetButtons()
 
 makeStepper("TP OFFSET  (studs up)", TP_OFFSET, 0, 30, 1, function(v) return tostring(v) end,
@@ -1947,6 +2318,33 @@ end)
 
 -- ── DEBUG ────────────────────────────────────────────
 cfgLabel("DEBUG")
+
+cfgLabel("AUTO FETCH  (optional)")
+local fetchRow = Instance.new("Frame"); fetchRow.Size = UDim2.new(1,-8,0,40)
+fetchRow.BackgroundTransparency = 1; fetchRow.Parent = configPage
+local function fetchBtn(w, x, txt) return segBtn(fetchRow, w, x, txt) end
+local fbFetch = fetchBtn(0.34, 0,    "▶ START")
+local fbStop  = fetchBtn(0.33, 0.34, "■ STOP")
+local fbRar   = fetchBtn(0.33, 0.67, "⭐ RARITY")
+fbRar.TextSize = 10
+fbFetch.Activated:Connect(function()
+    playClick()
+    if FETCH.on then return end
+    FETCH.on = true
+    fbFetch.BackgroundColor3 = Color3.fromRGB(35,120,200)
+    FETCH.run()
+end)
+fbStop.Activated:Connect(function()
+    playClick()
+    fbFetch.BackgroundColor3 = Themes[1].Panel
+    FETCH.stop("you pressed stop")
+end)
+fbRar.Activated:Connect(function()
+    playClick()
+    local r = FETCH.cycleRarity()
+    fbRar.Text = "⭐ "..string.upper(r)
+end)
+log("Auto Fetch is opt-in: press START in Config. Defaults to top-5 rarities.", LOG_INFO)
 
 local selfTestBtn = cfgBtn("🧪  Re-run diagnostics (optional)")
 selfTestBtn.TextColor3 = LOG_TEST
@@ -2123,7 +2521,7 @@ local function setMinimized(on)
     subLabel.Visible    = not on
     sidebar.Visible     = not on
     contentArea.Visible = not on
-    -- resizeHandle hidden: resizing a 55px title bar makes no sense.
+    -- resizeHandle hidden: RESZ.on a 55px title bar makes no sense.
     -- dragHandle left alone so the minimised bar can still be moved.
     resizeHandle.Visible= not on
     tw(main,   TweenInfo.new(0.18,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=target})
@@ -2136,46 +2534,46 @@ btnMin.Activated:Connect(function() playClick(); setMinimized(not MINIMIZED) end
 -- ======================================================
 -- DRAGGING & RESIZING
 -- ======================================================
-local dragging=false; local dragStartInput=nil; local dragStartPos=nil
+local DRAG = {on=false, i=nil, p=nil}
 dragHandle.InputBegan:Connect(function(i)
     if MINIMIZED then return end
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        dragging=true; dragStartInput=i.Position; dragStartPos=main.Position
+        DRAG.on=true; DRAG.i=i.Position; DRAG.p=main.Position
         tw(dragLine,TweenInfo.new(0.10),{Size=UDim2.fromOffset(108,6)})
     end
 end)
 
-local resizing=false; local resizeStartInput=nil; local resizeStartSize=nil
+local RESZ = {on=false, i=nil, s=nil}
 resizeHandle.InputBegan:Connect(function(i)
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        resizing=true; resizeStartInput=i.Position; resizeStartSize=main.Size; playClick()
+        RESZ.on=true; RESZ.i=i.Position; RESZ.s=main.Size; playClick()
     end
 end)
 
 UIS.InputChanged:Connect(function(i)
     local t=i.UserInputType
     if t~=Enum.UserInputType.MouseMovement and t~=Enum.UserInputType.Touch then return end
-    if dragging then
-        local d=i.Position-dragStartInput; local cam=workspace.CurrentCamera
+    if DRAG.on then
+        local d=i.Position-DRAG.i; local cam=workspace.CurrentCamera
         local vp=cam and cam.ViewportSize or Vector2.new(1920,1080)
         local hw=main.AbsoluteSize.X*0.5; local hh=main.AbsoluteSize.Y*0.5
-        local ox=math.clamp(dragStartPos.X.Offset+d.X,-vp.X*0.5+hw+4,vp.X*0.5-hw-4)
-        local oy=math.clamp(dragStartPos.Y.Offset+d.Y,-vp.Y*0.5+hh+4,vp.Y*0.5-hh-4)
+        local ox=math.clamp(DRAG.p.X.Offset+d.X,-vp.X*0.5+hw+4,vp.X*0.5-hw-4)
+        local oy=math.clamp(DRAG.p.Y.Offset+d.Y,-vp.Y*0.5+hh+4,vp.Y*0.5-hh-4)
         main.Position=UDim2.new(0.5,ox,0.5,oy); shadow.Position=UDim2.new(0.5,ox,0.5,oy)
     end
-    if resizing then
-        if MINIMIZED then resizing=false; return end
-        local d=i.Position-resizeStartInput
-        local w=math.clamp(resizeStartSize.X.Offset+d.X*2,300,520)
-        local h=math.clamp(resizeStartSize.Y.Offset+d.Y*2,240,520)
+    if RESZ.on then
+        if MINIMIZED then RESZ.on=false; return end
+        local d=i.Position-RESZ.i
+        local w=math.clamp(RESZ.s.X.Offset+d.X*2,300,520)
+        local h=math.clamp(RESZ.s.Y.Offset+d.Y*2,240,520)
         main.Size=UDim2.fromOffset(w,h); shadow.Size=UDim2.fromOffset(w,h)
     end
 end)
 
 UIS.InputEnded:Connect(function(i)
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        if dragging then dragging=false; tw(dragLine,TweenInfo.new(0.16),{Size=UDim2.fromOffset(76,3)}) end
-        resizing=false
+        if DRAG.on then DRAG.on=false; tw(dragLine,TweenInfo.new(0.16),{Size=UDim2.fromOffset(76,3)}) end
+        RESZ.on=false
     end
 end)
 
@@ -2199,20 +2597,20 @@ task.spawn(function()
     end
 end)
 
-local vxDrag=false; local vxStart=nil; local vxPos=nil
+local VXD = {on=false, s=nil, p=nil}
 openBtn.InputBegan:Connect(function(i)
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-        vxDrag=true; vxStart=i.Position; vxPos=openBtn.Position
+        VXD.on=true; VXD.s=i.Position; VXD.p=openBtn.Position
     end
 end)
 UIS.InputChanged:Connect(function(i)
-    if vxDrag and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
-        local d=i.Position-vxStart
-        openBtn.Position=UDim2.new(vxPos.X.Scale,vxPos.X.Offset+d.X,vxPos.Y.Scale,vxPos.Y.Offset+d.Y)
+    if VXD.on and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+        local d=i.Position-VXD.s
+        openBtn.Position=UDim2.new(VXD.p.X.Scale,VXD.p.X.Offset+d.X,VXD.p.Y.Scale,VXD.p.Y.Offset+d.Y)
     end
 end)
 UIS.InputEnded:Connect(function(i)
-    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then vxDrag=false end
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then VXD.on=false end
 end)
 
 local function openGui()
@@ -2352,17 +2750,15 @@ RUN.shutdown = function()
 end
 rawset(HOST, "VirexHub", RUN)
 
-local reloadBtn = cfgBtn("⟳  Reload script from GitHub" .. (HAS_LOADSTRING and "" or "  (no loadstring)"))
-reloadBtn.TextColor3 = HAS_LOADSTRING and LOG_INFO or Color3.fromRGB(120,120,130)
-reloadBtn.Activated:Connect(function()
+do local _b = cfgBtn("⟳  Reload script from GitHub" .. (HAS_LOADSTRING and "" or "  (no loadstring)"))
+_b.TextColor3 = HAS_LOADSTRING and LOG_INFO or Color3.fromRGB(120,120,130)
+_b.Activated:Connect(function()
     playClick()
     if not HAS_LOADSTRING then log("loadstring unavailable in this environment", LOG_ERR); return end
     reloadScript()
-end)
+end) end
 
-local urlBtn = cfgBtn("🔗  Copy loader one-liner")
-urlBtn.TextColor3 = Color3.fromRGB(150,150,165)
-urlBtn.Activated:Connect(function()
+cfgBtn("🔗  Copy loader one-liner").Activated:Connect(function()
     playClick()
     local line = 'loadstring(game:HttpGet("'..SCRIPT_URL..'"))()'
     local ok = pcall(function() setclipboard(line) end)
@@ -2425,7 +2821,10 @@ task.delay(2.5, function()
     task.spawn(function()
         log("Probing transport methods over a 400-stud distance...", LOG_INFO)
         runMovementSelfTest()
-        if HOP_WORKS then
+        if FLOW_WORKS then
+            RETURN_METHOD = "FLOW"
+            log("Transport selected: FLOW (frame-stepped, server-paced)", LOG_OK)
+        elseif HOP_WORKS then
             RETURN_METHOD = "HOP"
             log("Transport selected: HOP (multi-hop TP verified)", LOG_OK)
         elseif SNAP_WORKS then
