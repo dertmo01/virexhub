@@ -44,6 +44,7 @@ local transport = fetch("src/core/transport.lua")
 local antihit   = fetch("src/core/antihit.lua")
 local eggs      = fetch("src/core/eggs.lua")
 local selftest  = fetch("src/core/selftest.lua")
+local probe     = fetch("src/core/probe.lua")
 local kit       = fetch("src/ui/kit.lua")
 local tabFeatures = fetch("src/tabs/features.lua")
 local tabLogs     = fetch("src/tabs/logs.lua")
@@ -61,7 +62,7 @@ kit.registerTab("Config",   "\226\154\149", 3)
 
 local V = {
     log = log, util = util, transport = transport,
-    antihit = antihit, eggs = eggs, selftest = selftest, ui = kit,
+    antihit = antihit, eggs = eggs, selftest = selftest, probe = probe, ui = kit,
 }
 V.scriptURL = BASE .. "virexhub.lua?" .. stamp
 

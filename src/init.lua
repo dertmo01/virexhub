@@ -30,6 +30,7 @@ function M.wire(deps)
     M.antihit   = deps.antihit
     M.eggs      = deps.eggs
     M.selftest  = deps.selftest
+    M.probe     = deps.probe
     M.ui        = deps.ui
 
     M.log.util = M.util
@@ -51,6 +52,10 @@ function M.wire(deps)
     M.selftest.antihit    = M.antihit
     M.selftest.eggs       = M.eggs
     M.selftest.hasLoadstring = M.hasLoadstring
+
+    M.probe.log       = M.log
+    M.probe.util      = M.util
+    M.probe.transport = M.transport
 end
 
 function M.shutdown()

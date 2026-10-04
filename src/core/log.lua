@@ -1,8 +1,10 @@
 -- src/core/log.lua -- logging, self-test scoring, and the clipboard export.
 -- Loaded first; every other module calls log.write() and never touches the DOM.
-local Players           = game:GetService("Players")
+local Players            = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
-local Player            = Players.LocalPlayer
+local GuiService         = game:GetService("GuiService")
+local UserInputService   = game:GetService("UserInputService")
+local Player             = Players.LocalPlayer
 
 local M = {}
 
@@ -13,7 +15,10 @@ M.INFO = Color3.fromRGB(130,185,255)
 M.PLAIN = Color3.fromRGB(200,200,210)
 M.TEST = Color3.fromRGB(190,140,255)   -- section header for a self-test phase
 
-M.MAX_LINES = 60
+-- Was 60, which a remote-spy session overwrites in about a second and loses the
+-- pickup that explains the failure. 400 TextLabels is cheap; the DOM is trimmed
+-- to this many so a long session cannot grow without bound.
+M.MAX_LINES = 400
 M.lines  = {}
 M.buffer = {}
 M.test   = { pass=0, fail=0, warn=0, lines={} }
@@ -121,16 +126,69 @@ function M.buildReport(state)
     return table.concat(h, "\n") .. table.concat(M.buffer, "\n"), #problems
 end
 
+-- Clipboard, honestly.
+--
+-- This never worked reliably and the failure was invisible, which is the worst
+-- combination: the log said nothing, the user assumed the export was empty, and
+-- the whole diagnostic loop died. Three problems with the old version:
+--
+--   * Roblox's own API was not in the list. GuiService:SetClipboard is the
+--     supported path and it was simply missing.
+--   * "ok" only meant "we called something without erroring". Several of these
+--     APIs accept the call and then write nothing, so a silent failure reported
+--     success. UserInputService:GetClipboardText lets us read it back and check.
+--   * There was no fallback if all of them failed, so the export was
+--     unreachable exactly when it was needed.
+function M.setClipboard(text)
+    local tried = {}
+
+    -- 1. Roblox's supported API.
+    local ok, err = pcall(function() GuiService:SetClipboard(text) end)
+    tried[#tried + 1] = ok and "GuiService ok" or ("GuiService: " .. tostring(err))
+    if ok then
+        -- Verify. Only trust it if the text actually came back.
+        local read = nil
+        pcall(function() read = UserInputService:GetClipboardText() end)
+        if type(read) == "string" and #read > 0 then return true, "GuiService (verified)" end
+        tried[#tried + 1] = "GuiService set but clipboard read back empty"
+    end
+
+    -- 2. Executor globals. try/catch each, because one throwing must not stop
+    --    the next from being tried.
+    for _, spec in ipairs({
+        { "setclipboard", function() setclipboard(text) end },
+        { "syn.clipboard", function() syn.clipboard.set(text) end },
+        { "Clipboard.set", function() Clipboard.set(text) end },
+        { "writeclipboard", function() writeclipboard(text) end },
+    }) do
+        local success, e = pcall(spec[2])
+        tried[#tried + 1] = success and (spec[1] .. " ok") or (spec[1] .. ": " .. tostring(e))
+        if success then
+            local read = nil
+            pcall(function() read = UserInputService:GetClipboardText() end)
+            if type(read) == "string" and #read > 0 then return true, spec[1] .. " (verified)" end
+        end
+    end
+
+    M.lastClipboardError = table.concat(tried, " | ")
+    return false, table.concat(tried, " | ")
+end
+
 function M.copy(state, quiet)
-    local text = M.buildReport(state)
-    local ok = pcall(function() setclipboard(text) end)
-    if not ok then ok = pcall(function() syn.clipboard.set(text) end) end
-    if not ok then ok = pcall(function() Clipboard.set(text) end) end
-    if not quiet and M.onCopy then M.onCopy(ok) end
-    M.write(ok and ("Copied "..#M.buffer.." log lines + report header to clipboard")
-              or "Could not reach any clipboard API - screenshot the LOGS tab instead",
-            ok and M.OK or M.ERR)
-    return ok
+    local text, nProblems = M.buildReport(state)
+    local ok, how = M.setClipboard(text)
+    if not quiet and M.onCopy then M.onCopy(ok, how, text) end
+    if ok then
+        M.write(string.format("Copied %d lines (%d chars) via %s", #M.buffer, #text, how), M.OK)
+        if nProblems > 0 then
+            M.write("Header lists " .. nProblems .. " problem(s) - they are at the top of the copy.", M.WARN)
+        end
+    else
+        M.write("Clipboard failed. Tried: " .. tostring(how), M.ERR)
+        M.write("The full text is now in the box below - press Copy Manual, " ..
+            "or long-press and Copy in the menu.", M.WARN)
+    end
+    return ok, text
 end
 
 return M
