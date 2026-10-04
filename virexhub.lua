@@ -163,7 +163,14 @@ subLabel.Font=Enum.Font.FredokaOne; subLabel.Text="ANTI-GUARD"; subLabel.TextSiz
 subLabel.TextXAlignment=Enum.TextXAlignment.Center; subLabel.TextColor3=Color3.fromRGB(145,145,155)
 subLabel.Parent=topBar
 
--- Only a close button now (minimize removed).
+-- Header buttons: minimize then close.
+local btnMin=Instance.new("TextButton"); btnMin.Size=UDim2.fromOffset(30,28)
+btnMin.Position=UDim2.new(1,-42,0,8); btnMin.AnchorPoint=Vector2.new(1,0)
+btnMin.BackgroundColor3=Themes[1].Panel; btnMin.BorderSizePixel=0
+btnMin.Text="–"; btnMin.Font=Enum.Font.FredokaOne; btnMin.TextSize=16
+btnMin.TextColor3=Color3.new(1,1,1); btnMin.AutoButtonColor=false; btnMin.Parent=topBar
+Instance.new("UICorner",btnMin).CornerRadius=UDim.new(0,8)
+
 local btnClose=Instance.new("TextButton"); btnClose.Size=UDim2.fromOffset(30,28)
 btnClose.Position=UDim2.new(1,-8,0,8); btnClose.AnchorPoint=Vector2.new(1,0)
 btnClose.BackgroundColor3=Themes[1].Panel; btnClose.BorderSizePixel=0
@@ -208,7 +215,7 @@ Instance.new("UICorner",sidebar).CornerRadius=UDim.new(0,12)
 
 -- CONTENT
 local contentArea=Instance.new("Frame"); contentArea.Name="Content"
-contentArea.Position=UDim2.new(0,114,0,61); contentArea.Size=UDim2.new(1,-122,1,-69)
+contentArea.Position=UDim2.fromOffset(114,61); contentArea.Size=UDim2.new(1,-122,1,-69)
 contentArea.BackgroundTransparency=1; contentArea.Parent=main
 
 -- ── PAGES ─────────────────────────────────────────────
@@ -1076,10 +1083,18 @@ sizeRow.BackgroundTransparency=1; sizeRow.Parent=configPage
 local sizeDec = segBtn(sizeRow, 0.28, 0,    "−"); sizeDec.TextSize=16
 local sizeVal = segBtn(sizeRow, 0.44, 0.28, SizeNames[SizeIndex]); sizeVal.TextSize=12
 local sizeInc = segBtn(sizeRow, 0.28, 0.72, "+"); sizeInc.TextSize=16
+-- Forward-declared: applySize() above needs to read these, and the real
+-- MINIMIZE section further down owns the behaviour.
+local MINIMIZED = false
+local HEADER_H  = 55
+
 local function applySize()
     sizeVal.Text = SizeNames[SizeIndex]
-    tw(main,TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=Sizes[SizeIndex]})
-    tw(shadow,TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=Sizes[SizeIndex]})
+    local target = MINIMIZED
+        and UDim2.fromOffset(Sizes[SizeIndex].X.Offset, HEADER_H)
+        or  Sizes[SizeIndex]
+    tw(main,TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=target})
+    tw(shadow,TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=target})
 end
 sizeDec.Activated:Connect(function() playClick(); SizeIndex=math.max(1,SizeIndex-1); applySize() end)
 sizeInc.Activated:Connect(function() playClick(); SizeIndex=math.min(#Sizes,SizeIndex+1); applySize() end)
@@ -1117,10 +1132,36 @@ local infoBtn = cfgBtn("Close (×) • drag the bar below • F9 = reload")
 infoBtn.TextColor3 = Color3.fromRGB(145,145,155)
 
 -- ======================================================
+-- MINIMIZE
+-- ======================================================
+-- Collapses in place to just the title bar. Deliberately does NOT move the
+-- window and does NOT spawn a separate floating restore button -- the earlier
+-- version did both, and the floating chip was easy to lose track of, which is
+-- why minimize felt broken. The same button restores, so it can never be lost.
+local function setMinimized(on)
+    MINIMIZED = on
+    local keepW   = main.Size.X.Offset ~= 0 and main.Size.X.Offset or Sizes[SizeIndex].X.Offset
+    local target  = on and UDim2.fromOffset(keepW, HEADER_H) or Sizes[SizeIndex]
+    btnMin.Text   = on and "+" or "–"
+    subLabel.Visible    = not on
+    sidebar.Visible     = not on
+    contentArea.Visible = not on
+    -- resizeHandle hidden: resizing a 55px title bar makes no sense.
+    -- dragHandle left alone so the minimised bar can still be moved.
+    resizeHandle.Visible= not on
+    tw(main,   TweenInfo.new(0.18,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=target})
+    tw(shadow,TweenInfo.new(0.18,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{Size=target})
+    log(on and "UI minimised — press + in the title bar to restore" or "UI restored", LOG_INFO)
+end
+
+btnMin.Activated:Connect(function() playClick(); setMinimized(not MINIMIZED) end)
+
+-- ======================================================
 -- DRAGGING & RESIZING
 -- ======================================================
 local dragging=false; local dragStartInput=nil; local dragStartPos=nil
 dragHandle.InputBegan:Connect(function(i)
+    if MINIMIZED then return end
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
         dragging=true; dragStartInput=i.Position; dragStartPos=main.Position
         tw(dragLine,TweenInfo.new(0.10),{Size=UDim2.fromOffset(108,6)})
@@ -1146,6 +1187,7 @@ UIS.InputChanged:Connect(function(i)
         main.Position=UDim2.new(0.5,ox,0.5,oy); shadow.Position=UDim2.new(0.5,ox,0.5,oy)
     end
     if resizing then
+        if MINIMIZED then resizing=false; return end
         local d=i.Position-resizeStartInput
         local w=math.clamp(resizeStartSize.X.Offset+d.X*2,300,520)
         local h=math.clamp(resizeStartSize.Y.Offset+d.Y*2,240,520)

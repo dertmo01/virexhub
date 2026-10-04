@@ -36,9 +36,15 @@ git push
 |---|---|
 | Move window | Drag the coloured bar under the window |
 | Resize window | Drag the `↘` handle at the bottom-right |
+| Minimize | `–` in the title bar — collapses in place to just the bar |
+| Restore | `+` in the title bar (same button) |
 | Close | `×` top-right |
 | Reopen | The `VX` circle (drag it anywhere) |
 | Reload script | `F9` |
+
+Minimize collapses the window where it is rather than parking it somewhere else,
+and the restore control is the same button — so there's nothing to lose track of.
+It stays draggable while minimized, and changing GUI size keeps it collapsed.
 
 ---
 
