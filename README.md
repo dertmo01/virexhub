@@ -8,18 +8,58 @@ Paste one line. The loader fetches everything else. No `require`, no setup.
 
 ---
 
-## Loader
+## Run it
 
-Copy this into your executor and run it:
+Paste **one line** into your executor while playing
+[Steal An Egg](https://www.roblox.com/games/107778070777162):
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"))()
 ```
 
-The loader is the only file you need. It fetches `src/` at run time, so fixes
-land without you re-pasting anything.
+### Steps
 
-### Layout
+1. Join **Steal An Egg** (placeId `107778070777162`) — the script detects this
+   game by its eggs, prompts and base markers, so it must be this place.
+2. Open your executor (Solara, Fluxus, Delta, Wave, etc.).
+3. Paste the line above into the script/lua editor.
+4. Press **Execute** / **Run**.
+
+That is the whole setup. There is no config file and nothing to install.
+
+### What happens next
+
+On load the script:
+
+- draws the Virex window,
+- sets every egg prompt's `HoldDuration` to 0 so pickup is instant,
+- **switches Anti Hit on by itself** and starts watching for the guard,
+- resolves your base automatically,
+- runs its own diagnostics and writes a PASS/FAIL report,
+- copies that report to your clipboard automatically.
+
+Then just **walk up to an egg and interact.** Nothing else to press.
+
+To undo: close the window with `×`. To bring it back, click the `VX` chip that
+appears at the right edge.
+
+### Updating
+
+The loader fetches everything at run time, so a fix reaches you without
+re-pasting. Re-run the same line whenever you want the latest version.
+
+**F9** re-runs the loader in place, without leaving the server.
+
+> F9 pulls from `master`. If you edited the files locally but did not push, a
+> reload just runs the old code.
+
+### If it does not run
+
+The window not appearing is almost always the fetch failing. Open the
+**Logs** tab and press **COPY ALL**, then paste the result — it names any file it
+could not download and shows the exact URL it tried.
+
+## Project layout
 
 | file | what it does |
 |---|---|
@@ -34,48 +74,13 @@ land without you re-pasting anything.
 | `src/ui/kit.lua` | window, theme, widgets |
 | `src/tabs/*.lua` | the Logs / Features / Config tabs |
 
-### Tabs
+## Tabs
 
 - **Features** — switches and live status for Anti Hit, Auto Run and Auto Fetch,
   including the multi-select rarity chips.
 - **Logs** — the console, `COPY ALL` (summary header first, then the full log),
   and both diagnostics buttons.
 - **Config** — return method, movement tuning, toggles, base re-detect, theme.
-
-### That's it. Zero configuration.
-
-There is nothing to set up. On load the script:
-
-1. runs its own diagnostics and writes a PASS/FAIL report to the console
-2. resolves your base automatically
-3. **switches Anti Hit on by itself**
-4. **copies the whole report to your clipboard automatically**
-
-So the workflow is: **run the loader → walk up to an egg → interact.** Then paste
-your clipboard into a message.
-
-### Hot reload
-
-Editing locally, then:
-
-```bash
-git push
-```
-
-…then press **F9** in-game. The script re-fetches the same URL and re-runs itself.
-The window is draggable by the bar under it, resizable by the corner
-handle, and collapsible to the title bar with `–`.
-
-> **F9 pulls from `master`.** If you edit the file locally without pushing, reload will just run the old code.
-
-### If something is wrong
-
-Everything in Config is an *optional correction*, never a required step. The one
-worth knowing: if the log says the resolved base is wrong, stand at your real base
-and press **📍 Base is WRONG? Use my current position**. Takes effect on the next
-run, no reload needed.
-
----
 
 ## Controls
 
@@ -174,26 +179,34 @@ doesn't permanently downgrade the mode.
 While walking it also detects being stuck (under 2 studs moved per 1.5s, three
 times running) and attempts a TP as recovery before giving up on the walk.
 
-### Debug
-- **▶ Trigger Auto Run NOW** — run a return leg immediately
-- **⚡ Test TP to base only** — isolates whether TP works, nothing else running
-- **📍 Scan spawn locations** — dump every `SpawnLocation` + your position
-- **🥚 Check carry status + speed** — carrying state, real vs. configured speed, distance to base
+### Manual tests
 
-While walking, the console logs progress every 2s (`N studs to go • speed X •
-carrying egg`) plus any stuck detections, so "why is it slow" is always
-answerable from the log.
+On **Features**:
+- **Test dodge now** — runs the dodge route without waiting for the guard
+- **Return to base now** — runs a full return leg immediately
+
+On **Logs → Diagnostics**:
+- **Re-run diagnostics** — re-runs the static checks, no movement
+- **Test movement methods** — probes 180 studs out and back with each method
+
+The movement test moves you for real. It uses 180 studs rather than 3 because a
+3-stud hop passes on methods this server actually rejects, so a shorter probe
+reports success while the feature is broken.
 
 ### Look
 GUI size (small/medium/large) and 5 themes.
 
 ---
 
-## Console tab
+## Logs tab
 
-Every decision the script makes is logged with a timestamp and colour. `🗑 Clear` and `📋 Copy All` (clipboard) are at the top.
+Every decision the script makes is logged with a timestamp and colour.
+**COPY ALL** and **CLEAR** are at the top.
 
-Use **Copy All** when reporting a problem — the log is what gets diagnosed first.
+Use **COPY ALL** when reporting a problem. It puts a summary header on the
+clipboard first — your settings, the self-test score, and every FAIL/WARN — and
+then the full log, so the verdict is the first thing anyone reads rather than
+buried under 60 lines of INFO.
 
 ---
 

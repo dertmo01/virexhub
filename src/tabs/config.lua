@@ -105,11 +105,30 @@ function M.build(parent)
 
     -- -- BASE ----------------------------------------------------------
     ui.label(parent, "BASE", nextO())
-    ui.note(parent, "Detected: "..tostring(T.baseLabel or "(not resolved yet)"), nextO())
-    ui.button(parent, "Re-detect base", nextO()).Activated:Connect(function()
+    local baseInfo = ui.note(parent, "Detected: "..tostring(T.baseLabel or "(not resolved yet)"), nextO())
+    -- Auto-detection latches onto the first marker it recognises, which is
+    -- right on this game but not guaranteed forever. These two are the escape
+    -- hatch: pin it to where you actually stand, or clear the pin and let it
+    -- look again. Neither needs a reload.
+    ui.button(parent, "Use my current position as base", nextO()).Activated:Connect(function()
         ui.playClick()
+        local root = mods.util.root()
+        if not root then
+            mods.log.write("No HumanoidRootPart - cannot pin the base.", mods.log.ERR)
+            return
+        end
+        T.baseOverride = root.Position
+        T.baseLabel = "your position ("..math.floor(root.Position.X)..", "..
+                      math.floor(root.Position.Y)..", "..math.floor(root.Position.Z)..")"
+        mods.log.write("Base pinned to your current position.", mods.log.OK)
+        if baseInfo then baseInfo.Text = "Detected: "..tostring(T.baseLabel) end
+    end)
+    ui.button(parent, "Re-detect base (clear my pin)", nextO()).Activated:Connect(function()
+        ui.playClick()
+        T.baseOverride = nil
         T.resetBaseCache()
-        mods.log.write("Base cache cleared; it re-detects on the next return.", mods.log.INFO)
+        mods.log.write("Base pin cleared; it re-detects on the next return.", mods.log.INFO)
+        if baseInfo then baseInfo.Text = "Detected: re-detecting on next return..." end
     end)
 
     -- -- LOOK ----------------------------------------------------------
