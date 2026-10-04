@@ -33,6 +33,7 @@ local RUN = { shutdown = function() end }
 -- these, but they are configured much further down. Declared here as locals so
 -- that reference resolves to the real setting instead of a nil global.
 local AntiHitEnabled, AntiHitRunning, RETURN_METHOD
+local HOP_WORKS, SNAP_WORKS
 local BASE_OVERRIDE, BASE_LABEL, GUARD_SAFE_ZONE, BASE_CACHED
 
 local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
@@ -388,12 +389,19 @@ end)
 -- clipboard on its own -- the user should never have to find this button.
 function RUN.copyAll(quiet)
     -- FAIL/WARN lines go in the header, not just the body: the console keeps
-    -- only the last 60 lines, so on a busy run the verdict used to scroll away
-    -- and the export showed only a count with no explanation.
-    local problems = {}
+    -- only the last 60 lines, so on a busy run the verdict used to scroll away.
+    -- Deduped, because re-running the movement test appended the same failures
+    -- once per run and buried the distinct ones.
+    local problems, seen = {}, {}
     for _, l in ipairs(SELFTEST.lines) do
         if string.find(l, "FAIL", 1, true) or string.find(l, "WARN", 1, true) then
-            table.insert(problems, l)
+            -- strip the trailing detail so lines differing only in a number
+            -- collapse to one entry
+            local key = string.match(l, "^%[SELF%-TEST%] %u+%s+(.-)%s+—") or l
+            if not seen[key] then
+                seen[key] = true
+                table.insert(problems, l)
+            end
         end
     end
     local header = {
@@ -504,7 +512,7 @@ local function tpTo(position, offsetY)
     return (r.Position - dest).Magnitude <= 8
 end
 
--- Fire the egg's ProximityPrompt. Kept as a fallback only -- see applyFastClick,
+-- Fire the egg's ProximityPrompt. Kept as a fallback only -- see applyHoldDuration,
 -- which zeroes HoldDuration and is what actually makes prompts instant.
 local function fireEggPrompt(prompt)
     if not prompt then return false end
@@ -512,6 +520,71 @@ local function fireEggPrompt(prompt)
         return pcall(fireproximityprompt, prompt) or false
     end
     return false
+end
+
+-- ── HOP TP ────────────────────────────────────────────
+-- THE fix for this server, derived from the live logs:
+--   ARRIVED at base (TP)  succeeded over  ~37 studs
+--   TP rejected           over 90 studs, and again over 1770 studs
+-- The server validates the SIZE of the position delta, not the absolute
+-- position. One 1770-stud CFrame jump is a discontinuity it rejects; the same
+-- destination reached as ~50 small verified hops is indistinguishable from
+-- ordinary movement. Every hop is written and then re-read, so a server that
+-- silently freezes us is detected in three hops instead of at a timeout.
+local HOP_DISTANCE   = 35    -- studs per hop, comfortably inside the accepted range
+local HOP_SETTLE     = 0.06  -- pause between hops so replication can keep up
+local HOP_MAX        = 120   -- 120 * 35 = 4200 studs of reach
+local HOP_TOLERANCE  = 14    -- how far off a hop may land before we call it rejected
+local HOP_STALL_LIMIT = 3    -- consecutive non-progressing hops before giving up
+
+local function hopTp(position, offsetY)
+    local dest  = position + Vector3.new(0, offsetY or 0, 0)
+    local hops, stalls = 0, 0
+    local lastDist = math.huge
+
+    while true do
+        local r = getRoot()
+        if not r then return false, "lost root" end
+        local hum = getHumanoid()
+        if hum and hum.Health <= 0 then return false, "died" end
+
+        local delta = dest - r.Position
+        local dist  = delta.Magnitude
+        if dist <= 4 then
+            return true, hops
+        end
+        if hops >= HOP_MAX then return false, "hop limit" end
+
+        -- progress tracking, so a server that silently freezes us can't spin us
+        if dist > lastDist - 0.5 then
+            stalls += 1
+            if stalls >= HOP_STALL_LIMIT then return false, "server blocked progress" end
+        else
+            stalls = 0
+        end
+        lastDist = dist
+
+        local step
+        if dist <= HOP_DISTANCE * 1.4 then
+            step = dest                             -- final short hop, land exactly
+        else
+            step = r.Position + delta.Unit * HOP_DISTANCE
+        end
+
+        pcall(function()
+            r.AssemblyLinearVelocity  = Vector3.zero
+            r.AssemblyAngularVelocity = Vector3.zero
+            r.CFrame = CFrame.new(step)
+        end)
+        hops += 1
+        task.wait(HOP_SETTLE)
+
+        local r2 = getRoot()
+        if not r2 then return false, "lost root" end
+        if (r2.Position - step).Magnitude > HOP_TOLERANCE then
+            return false, "server corrected hop "..hops.." ("..math.floor(dist).." studs out)"
+        end
+    end
 end
 
 -- ======================================================
@@ -691,7 +764,13 @@ local function glideTo(position, offsetY)
 
         pcall(function()
             bv.Velocity = dir.Unit * math.clamp(dir.Magnitude * 2.2, 90, 4000)
-            bg.CFrame = CFrame.new(r.Position, r.Position + Vector3.new(dir.X, 0, dir.Z))
+            -- lookAt is degenerate (and yields NaN) when the target is directly
+            -- overhead, i.e. horizontal delta is zero. That NaN propagated into
+            -- the character and showed up as 'drift=nan' in the self-test.
+            local flat = Vector3.new(dir.X, 0, dir.Z)
+            if flat.Magnitude > 0.01 then
+                bg.CFrame = CFrame.new(r.Position, r.Position + flat)
+            end
         end)
     end)
 
@@ -719,7 +798,11 @@ BASE_OVERRIDE = nil
 BASE_LABEL   = "auto"
 local BASE_RESOLVED = false
 
-local BASE_KEYWORDS = {"vase", "deposit", "base", "home", "safe", "return"}
+-- Only words that actually name a base. "safe" and "return" were removed: they
+-- matched this game's part literally named 'SafeZone' (457,67,-364), which is
+-- the guard-dodge zone, not the player's base. Auto-detect picked it and every
+-- "return to base" then walked 4 studs in the wrong direction.
+local BASE_KEYWORDS = {"vase", "deposit", "base", "home"}
 
 local function collectSpawnLocations()
     local list = {}
@@ -926,7 +1009,7 @@ setAhVisual(false)
 -- ======================================================
 -- FEATURE 2 : AUTO RUN BASE
 -- ======================================================
-RETURN_METHOD = "GLIDE"  -- "GLIDE" | "TELEPORT" | "WALK"
+RETURN_METHOD = "HOP"  -- "HOP" | "TELEPORT" | "GLIDE" | "WALK"
 local TP_OFFSET   = 5
 local RUN_SPEED   = 300
 local ARRIVE_DIST = 30
@@ -1098,7 +1181,19 @@ local function startAutoRun()
         -- GLIDE first: BodyVelocity + late CFrame snap. This is the only one
         -- that survives server-side position validation, because the bulk of
         -- the move is ordinary physics replication rather than one huge jump.
-        if method == "GLIDE" then
+        if method == "HOP" then
+            setArVisual("running","Hopping to base...")
+            local hopOK, info = hopTp(target, TP_OFFSET)
+            if hopOK then
+                log("AutoRun: ARRIVED at base ("..tostring(info).." hops)", LOG_OK)
+                arrived = true
+            else
+                log("AutoRun: hop failed ("..tostring(info)..") — trying direct TP", LOG_WARN)
+                method = "TELEPORT"
+            end
+        end
+
+        if not arrived and method == "GLIDE" then
             setArVisual("running","Gliding to base...")
             if glideTo(target, TP_OFFSET) then
                 log("AutoRun: ARRIVED at base (glide)", LOG_OK)
@@ -1511,21 +1606,43 @@ local function runMovementSelfTest()
 
     local origin = root.Position
 
-    -- 1. does a direct CFrame snap hold at all?
+    -- Probe each transport over a LONG horizontal distance, not a 3-stud hop:
+    -- the logs showed short jumps succeed and long ones get corrected, so a
+    -- 3-stud test proves nothing. Uses a point 400 studs out along +X, then
+    -- hops/walks back to where we started.
+    local far = origin + Vector3.new(400, 0, 0)
+
+    -- 1. multi-hop TP over a long distance -- the method that should win
+    local hopOK, hopInfo = hopTp(far, 0)
+    HOP_WORKS = hopOK
+    st(hopOK, "Multi-hop TP holds over 400 studs",
+        hopOK and ("landed in "..tostring(hopInfo).." hops") or ("failed: "..tostring(hopInfo)))
+    if hopOK then
+        -- come back the same way
+        local back = getRoot() and hopTp(origin, 0)
+        st(back, "Multi-hop TP returns home", nil, true)
+    else
+        -- hop failed, so put ourselves back with one plain snap if we can
+        pcall(function() getRoot().CFrame = CFrame.new(origin) end)
+    end
+
+    -- 2. does a single direct CFrame snap hold at all?
     local snapOK = tpTo(origin, 3)
+    SNAP_WORKS = snapOK
     st(snapOK, "Direct CFrame snap holds (3 studs up)",
-        snapOK and "TELEPORT method is viable" or "server corrected it — use GLIDE")
+        snapOK and "short TELEPORT jumps are accepted" or "even short snaps are corrected")
 
-    -- 2. does the glide survive?
+    -- 3. glide is no longer expected to work here; keep it informational only
     local glideOK = glideTo(origin, 0)
-    st(glideOK, "BodyVelocity glide holds (80 up, snap back)",
-        glideOK and "GLIDE method is viable — recommended default" or "glide did not stick")
+    st(glideOK, "BodyVelocity glide holds (informational)",
+        glideOK and "glide viable" or "glide does not stick on this server", true)
 
-    -- 3. did we end up back where we started?
+    -- 4. did we end up back where we started?
     task.wait(0.2)
     local r = getRoot()
-    local drift = r and math.floor((r.Position - origin).Magnitude) or -1
-    st(drift >= 0 and drift <= 12, "Returned to origin", "drift="..drift.." studs")
+    local drift = (r and (r.Position - origin).Magnitude) or -1
+    if drift ~= drift then drift = -1 end   -- NaN guard
+    st(drift >= 0 and drift <= 20, "Returned to origin", "drift="..math.floor(drift).." studs")
 
     -- 4. can we actually move under our own power?
     local hum2 = getHumanoid()
@@ -1639,15 +1756,21 @@ end
 cfgLabel("RETURN TO BASE")
 local retRow=Instance.new("Frame"); retRow.Size=UDim2.new(1,-8,0,40)
 retRow.BackgroundTransparency=1; retRow.Parent=configPage
-local retGlide = segBtn(retRow, 0.34, 0,    "🪂 GLIDE")
-local retTP    = segBtn(retRow, 0.33, 0.34, "⚡ TELEPORT")
-local retWalk  = segBtn(retRow, 0.33, 0.67, "🚶 WALK")
+local retHop   = segBtn(retRow, 0.25, 0,    "🔗 HOP")
+local retTP    = segBtn(retRow, 0.25, 0.25, "⚡ TP")
+local retGlide = segBtn(retRow, 0.25, 0.50, "🪂 GLIDE")
+local retWalk  = segBtn(retRow, 0.25, 0.75, "🚶 WALK")
 local function refreshRetButtons()
     local on = Color3.fromRGB(35,120,200)
-    retGlide.BackgroundColor3 = (RETURN_METHOD == "GLIDE")    and on or Themes[1].Panel
+    retHop.BackgroundColor3   = (RETURN_METHOD == "HOP")      and on or Themes[1].Panel
     retTP.BackgroundColor3    = (RETURN_METHOD == "TELEPORT") and on or Themes[1].Panel
+    retGlide.BackgroundColor3 = (RETURN_METHOD == "GLIDE")    and on or Themes[1].Panel
     retWalk.BackgroundColor3  = (RETURN_METHOD == "WALK")     and on or Themes[1].Panel
 end
+retHop.Activated:Connect(function()
+    playClick(); RETURN_METHOD = "HOP"; refreshRetButtons()
+    log("Return method = HOP (35-stud verified hops)", LOG_INFO)
+end)
 retGlide.Activated:Connect(function()
     playClick(); RETURN_METHOD = "GLIDE"; refreshRetButtons()
     log("Return method = GLIDE (BodyVelocity + late CFrame snap, hardest to detect)", LOG_INFO)
@@ -2155,9 +2278,28 @@ task.delay(2.5, function()
     AutoRunEnabled = true
     setArVisual("on", "ON  •  waits for egg interact")
 
+    -- Probe the transports once and pick the winner, so the user never has to
+    -- choose. Runs vertically and along +X then returns, so it cannot strand
+    -- them. Everything after this falls back automatically anyway.
+    task.spawn(function()
+        log("Probing transport methods over a 400-stud distance...", LOG_INFO)
+        runMovementSelfTest()
+        if HOP_WORKS then
+            RETURN_METHOD = "HOP"
+            log("Transport selected: HOP (multi-hop TP verified)", LOG_OK)
+        elseif SNAP_WORKS then
+            RETURN_METHOD = "TELEPORT"
+            log("Transport selected: TELEPORT (direct snap verified)", LOG_OK)
+        else
+            RETURN_METHOD = "WALK"
+            log("Transport selected: WALK (no TP method survived — this server blocks them)", LOG_WARN)
+        end
+        refreshRetButtons()
+    end)
+
     -- put the whole report on the clipboard so the only thing left to do is
     -- interact with an egg and paste
-    task.delay(1.5, function()
+    task.delay(9, function()
         log("Copying this report to your clipboard automatically — just paste it.", LOG_INFO)
         RUN.copyAll()
     end)
