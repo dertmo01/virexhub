@@ -33,6 +33,7 @@ local RUN = { shutdown = function() end }
 -- these, but they are configured much further down. Declared here as locals so
 -- that reference resolves to the real setting instead of a nil global.
 local AntiHitEnabled, AntiHitRunning, RETURN_METHOD
+local BASE_OVERRIDE, BASE_LABEL, GUARD_SAFE_ZONE
 
 local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
 local HAS_LOADSTRING = (type(loadstring) == "function") or (type(load) == "function")
@@ -384,6 +385,15 @@ clearBtn.Activated:Connect(function()
 end)
 
 copyBtn.Activated:Connect(function()
+    -- FAIL/WARN lines go in the header, not just the body: the console keeps
+    -- only the last 60 lines, so on a busy run the verdict used to scroll away
+    -- and the export showed only a count with no explanation.
+    local problems = {}
+    for _, l in ipairs(SELFTEST.lines) do
+        if string.find(l, "FAIL", 1, true) or string.find(l, "WARN", 1, true) then
+            table.insert(problems, l)
+        end
+    end
     local header = {
         "===== VIREX ANTI-GUARD — LOG EXPORT =====",
         "time    : "..os.date("%Y-%m-%d %H:%M:%S"),
@@ -393,11 +403,20 @@ copyBtn.Activated:Connect(function()
         "jobId   : "..tostring(game.JobId),
         "method  : "..tostring(RETURN_METHOD),
         "antihit : "..tostring(AntiHitEnabled),
+        "dodge   : "..(GUARD_SAFE_ZONE and "SAFE ZONE" or "WAYPOINT ROUTE"),
+        "base    : "..BASE_LABEL..(BASE_OVERRIDE and (" "..tostring(BASE_OVERRIDE)) or ""),
         "selftest: "..SELFTEST.pass.." PASS / "..SELFTEST.fail.." FAIL / "..SELFTEST.warn.." WARN",
-        "lines   : "..#logBuffer,
-        "==========================================",
-        "",
     }
+    if #problems > 0 then
+        table.insert(header, "------------------------------------------")
+        table.insert(header, "PROBLEMS ("..#problems.."):")
+        for _, p in ipairs(problems) do table.insert(header, p) end
+    else
+        table.insert(header, "problems : none")
+    end
+    table.insert(header, "lines    : "..#logBuffer)
+    table.insert(header, "==========================================")
+    table.insert(header, "")
     local text = table.concat(header, "\n") .. table.concat(logBuffer, "\n")
     local ok   = pcall(function() setclipboard(text) end)
     if not ok then ok = pcall(function() syn.clipboard.set(text) end) end
@@ -672,24 +691,65 @@ end
 -- stealvip2's DropEgg.POSITION_1 -- the reference's own deposit spot.
 local FALLBACK_BASE = Vector3.new(663,70,-369)
 
+-- The old resolver took the FIRST SpawnLocation it found in workspace, which in
+-- this game sits at (512,68,-362) -- right in the middle of the egg field, and
+-- ~1770 studs from the player. So "return to base" meant "walk 1770 studs back
+-- to the middle of the map". Hence: an explicit override the user can set by
+-- standing at their real base, and nearest-to-player as the fallback heuristic
+-- instead of first-found.
+BASE_OVERRIDE = nil
+BASE_LABEL   = "auto"
+
+local function collectSpawnLocations()
+    local list = {}
+    pcall(function()
+        for _,obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("SpawnLocation") then
+                table.insert(list, {
+                    name = obj.Name,
+                    pos  = obj.Position,
+                    team = (obj.TeamColor and obj.TeamColor.Name) or "?",
+                })
+            end
+        end
+    end)
+    return list
+end
+
 local function getBasePosition()
+    if BASE_OVERRIDE then
+        local root0 = getRoot()
+        local d0 = root0 and math.floor((root0.Position - BASE_OVERRIDE).Magnitude) or -1
+        log("Base: OVERRIDE "..BASE_LABEL.." at "..tostring(BASE_OVERRIDE).." ("..d0.." studs)", LOG_INFO)
+        return BASE_OVERRIDE
+    end
+
     local rl = Player.RespawnLocation
     if rl then
         log("Base: RespawnLocation '"..rl.Name.."' at "..tostring(rl.Position), LOG_INFO)
         return rl.Position
     end
-    log("Base: RespawnLocation nil, scanning workspace...", LOG_WARN)
-    local found = nil
-    pcall(function()
-        for _,obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("SpawnLocation") then
-                log("Base: SpawnLocation '"..obj.Name.."' at "..tostring(obj.Position), LOG_INFO)
-                found = obj.Position; break
-            end
-        end
-    end)
-    if found then return found end
-    log("Base: none found, using FALLBACK "..tostring(FALLBACK_BASE), LOG_WARN)
+
+    local list = collectSpawnLocations()
+    if #list == 0 then
+        log("Base: no SpawnLocation found, using FALLBACK "..tostring(FALLBACK_BASE), LOG_WARN)
+        return FALLBACK_BASE
+    end
+
+    local root = getRoot()
+    local best, bestD = nil, math.huge
+    log("Base: RespawnLocation nil; "..#list.." SpawnLocation(s) found — pick the right one below:", LOG_WARN)
+    for i, e in ipairs(list) do
+        local d = root and (root.Position - e.pos).Magnitude or math.huge
+        log(string.format("  [%d] '%s' team=%s  %s  %d studs away", i, e.name, e.team,
+            tostring(e.pos), math.floor(d)), d == bestD and LOG_INFO or LOG_INFO)
+        if d < bestD then bestD = d; best = e end
+    end
+    if best then
+        log("Base: auto-picked nearest '"..best.name.."' — WRONG if that isn't your base. "
+            .."Stand at your base and press '📍 Use current position as base'.", LOG_WARN)
+        return best.pos
+    end
     return FALLBACK_BASE
 end
 
@@ -760,20 +820,20 @@ local function setAhVisual(on)
     end
 end
 
+-- Relocates the player along the route and leaves them DISPLACED -- this is
+-- what keeps the guard from re-acquiring them, so it stays the default.
+-- Does not touch WalkSpeed or AntiHitRunning; beginDodge owns both.
 local function runAntiHitRoute()
     local root = getRoot()
     if not root then log("AntiHit: no HumanoidRootPart!", LOG_ERR); return end
-    AntiHitRunning = true
-    log("AntiHit: route started", LOG_OK)
+    log("AntiHit: route started ("..#ROUTE_WAYPOINTS.." waypoints)", LOG_OK)
     for i,pos in ipairs(ROUTE_WAYPOINTS) do
         if not AntiHitEnabled or not root.Parent then
             log("AntiHit: cancelled at waypoint "..i, LOG_WARN); break
         end
-        root.CFrame = CFrame.new(pos)
+        pcall(function() root.CFrame = CFrame.new(pos) end)
         task.wait(ANTI_HIT_STEP)
     end
-    AntiHitRunning = false
-    log("AntiHit: route done", LOG_OK)
 end
 
 ahCard.Activated:Connect(function()
@@ -803,7 +863,10 @@ local VELOCITY_BOOST = false  -- opt-in; bypasses WalkSpeed clamps (detectable)
 local BOOST_SPEED = 250
 local BOOST_UNTIL = 0
 local IGNORE_CARRY_SLOW = true  -- compensate the big-egg WalkSpeed penalty
-local GUARD_SAFE_ZONE  = true  -- safe-zone CFrame dodge instead of waypoint route
+-- Default is the waypoint ROUTE, not the safe zone. The safe zone returns you
+-- near where you were standing, which let the guard re-acquire you; the route
+-- displaces you ~46 studs and drops you from y=241 to y=70, which does not.
+GUARD_SAFE_ZONE  = false
 
 -- Games commonly halve WalkSpeed while you carry a "Big Egg". Read that off
 -- the character so we can log it and compensate.
@@ -1122,38 +1185,51 @@ local function beginDodge(reason)
     if not AntiHitEnabled or AntiHitRunning then return end
     task.spawn(function()
         log("Guard dodge triggered via "..reason, LOG_WARN)
-        if GUARD_SAFE_ZONE then
-            -- Reference approach: freeze the camera, snap to the safe zone,
-            -- sit out the guard's swing, then return to exactly where we were.
-            local root = getRoot()
-            local hum  = getHumanoid()
-            if root and hum then
-                AntiHitRunning = true
-                local original = root.CFrame
-                lockCamera()
+        local root = getRoot()
+        local hum  = getHumanoid()
+        if not root or not hum then log("AntiHit: no character", LOG_ERR); return end
+        AntiHitRunning = true
+
+        -- Always restore these on the way out. The previous version set
+        -- WalkSpeed = 0 and never put it back, which left the player unable to
+        -- run and is why the guard started catching them.
+        local savedSpeed = hum.WalkSpeed
+        local function finish(pos, label)
+            local r = getRoot()
+            if r then
                 pcall(function()
-                    hum:MoveTo(root.Position)
-                    hum.WalkSpeed = 0
-                    root.CFrame = CFrame.new(SAFE_ZONE)
-                    root.AssemblyLinearVelocity  = Vector3.zero
-                    root.AssemblyAngularVelocity = Vector3.zero
+                    if pos then r.CFrame = pos end
+                    r.AssemblyLinearVelocity  = Vector3.zero
+                    r.AssemblyAngularVelocity = Vector3.zero
                 end)
-                log("AntiHit: safe zone for "..SAFE_WAIT.."s", LOG_INFO)
-                task.wait(SAFE_WAIT)
-                local r2 = getRoot()
-                if r2 then
-                    pcall(function()
-                        r2.CFrame = original
-                        r2.AssemblyLinearVelocity  = Vector3.zero
-                        r2.AssemblyAngularVelocity = Vector3.zero
-                    end)
-                end
-                unlockCamera()
-                AntiHitRunning = false
-                log("AntiHit: returned to pre-guard position", LOG_OK)
             end
+            stripPushBack()
+            local h = getHumanoid()
+            if h then pcall(function() h.WalkSpeed = savedSpeed end) end
+            unlockCamera()
+            AntiHitRunning = false
+            log("AntiHit: "..label, LOG_OK)
+        end
+
+        if GUARD_SAFE_ZONE then
+            lockCamera()
+            pcall(function()
+                hum:MoveTo(root.Position)
+                hum.WalkSpeed = 0
+                root.CFrame = CFrame.new(SAFE_ZONE)
+                root.AssemblyLinearVelocity  = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end)
+            log("AntiHit: safe zone for "..SAFE_WAIT.."s", LOG_INFO)
+            task.wait(SAFE_WAIT)
+            -- Land on the LAST ROUTE WAYPOINT, not on `original`. Returning to
+            -- the exact pre-guard spot put the player back beside the guard,
+            -- which is the second reason it started chasing.
+            finish(CFrame.new(ROUTE_WAYPOINTS[#ROUTE_WAYPOINTS]), "safe zone done, moved clear of the guard")
         else
+            -- waypoint route: relocates the player and leaves them displaced
             runAntiHitRoute()
+            finish(nil, "route done")
         end
     end)
 end
@@ -1218,9 +1294,16 @@ ProximityPromptService.PromptTriggered:Connect(function(prompt, player)
     end
     if not Player.Character then log("Prompt: no character!", LOG_ERR); return end
 
+    -- Wait for the dodge to fully finish before heading home. Previously this
+    -- waited a flat 0.5s, which overlapped the 1s safe-zone wait, so the return
+    -- leg and the dodge were both writing the character's CFrame at once.
     task.spawn(function()
-        log("AntiHit: route finished, heading home...", LOG_OK)
-        task.wait(0.5)
+        local waited = 0
+        while AntiHitRunning and waited < 5 do
+            task.wait(0.05); waited += 0.05
+        end
+        log("AntiHit: dodge complete, heading home...", LOG_OK)
+        task.wait(0.3)
         if not AutoRunning then startAutoRun() end
     end)
     beginDodge("ProximityPrompt")
@@ -1573,16 +1656,37 @@ spawnScanBtn.Activated:Connect(function()
     log("=== SPAWN SCAN ===", LOG_INFO)
     log("Player.RespawnLocation = "..tostring(Player.RespawnLocation), LOG_INFO)
     log("Player.Team = "..tostring(Player.Team), LOG_INFO)
-    local count = 0
-    for _,obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("SpawnLocation") then
-            count += 1
-            log("SpawnLocation: '"..obj.Name.."' team="..(obj.TeamColor and tostring(obj.TeamColor) or "?").." pos="..tostring(obj.Position), LOG_INFO)
-        end
-    end
-    log("=== FOUND "..count.." SpawnLocation(s) ===", count>0 and LOG_OK or LOG_ERR)
     local root = getRoot()
+    local list = collectSpawnLocations()
+    for i, e in ipairs(list) do
+        local d = root and math.floor((root.Position - e.pos).Magnitude) or -1
+        log(string.format("[%d] '%s' team=%s  %s  %d studs away", i, e.name, e.team, tostring(e.pos), d), LOG_INFO)
+    end
+    log("=== FOUND "..#list.." SpawnLocation(s); hardcoded fallback "..tostring(FALLBACK_BASE).." ===", #list>0 and LOG_OK or LOG_ERR)
     if root then log("Your position = "..tostring(root.Position), LOG_INFO) end
+    if #list > 0 then
+        log("The auto-picker chooses the NEAREST one, which is usually wrong — stand at your real base and use '📍 Use current position as base'.", LOG_WARN)
+    end
+end)
+
+local setBaseBtn = cfgBtn("📍  Use current position as BASE")
+setBaseBtn.TextColor3 = LOG_OK
+setBaseBtn.Activated:Connect(function()
+    playClick()
+    local root = getRoot()
+    if not root then log("Base: no HumanoidRootPart", LOG_ERR); return end
+    BASE_OVERRIDE = root.Position
+    BASE_LABEL = "current position"
+    log("Base set to "..tostring(BASE_OVERRIDE), LOG_OK)
+    log("Auto Run Base will now return HERE. Reload is not needed — it takes effect on the next run.", LOG_INFO)
+end)
+
+local clearBaseBtn = cfgBtn("🗑  Clear base override (use auto-detect)")
+clearBaseBtn.Activated:Connect(function()
+    playClick()
+    BASE_OVERRIDE = nil
+    BASE_LABEL = "auto"
+    log("Base override cleared — back to auto-detect", LOG_INFO)
 end)
 
 local carryBtn = cfgBtn("🥚  Check carry status + speed")
