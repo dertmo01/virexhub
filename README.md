@@ -16,6 +16,18 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/dertmo01/virexhub/mas
 
 Or just paste the contents of [`virexhub.lua`](virexhub.lua) straight into your executor — the file **is** the script.
 
+### That's it. Zero configuration.
+
+There is nothing to set up. On load the script:
+
+1. runs its own diagnostics and writes a PASS/FAIL report to the console
+2. resolves your base automatically
+3. **switches Anti Hit on by itself**
+4. **copies the whole report to your clipboard automatically**
+
+So the workflow is: **run the loader → walk up to an egg → interact.** Then paste
+your clipboard into a message.
+
 ### Hot reload
 
 Editing locally, then:
@@ -24,9 +36,17 @@ Editing locally, then:
 git push
 ```
 
-…then press **F9** in-game. The script re-fetches the same URL and re-runs itself. You can also use **Config → ⟳ Reload script from GitHub**.
+…then press **F9** in-game. The script re-fetches the same URL and re-runs itself.
+You can also use **Config → ⟳ Reload script from GitHub**.
 
 > **F9 pulls from `master`.** If you edit the file locally without pushing, reload will just run the old code.
+
+### If something is wrong
+
+Everything in Config is an *optional correction*, never a required step. The one
+worth knowing: if the log says the resolved base is wrong, stand at your real base
+and press **📍 Base is WRONG? Use my current position**. Takes effect on the next
+run, no reload needed.
 
 ---
 

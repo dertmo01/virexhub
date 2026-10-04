@@ -33,7 +33,7 @@ local RUN = { shutdown = function() end }
 -- these, but they are configured much further down. Declared here as locals so
 -- that reference resolves to the real setting instead of a nil global.
 local AntiHitEnabled, AntiHitRunning, RETURN_METHOD
-local BASE_OVERRIDE, BASE_LABEL, GUARD_SAFE_ZONE
+local BASE_OVERRIDE, BASE_LABEL, GUARD_SAFE_ZONE, BASE_CACHED
 
 local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
 local HAS_LOADSTRING = (type(loadstring) == "function") or (type(load) == "function")
@@ -384,7 +384,9 @@ clearBtn.Activated:Connect(function()
     log("Console cleared.", LOG_INFO)
 end)
 
-copyBtn.Activated:Connect(function()
+-- Exported as RUN.copyAll so the startup sequence can push the report to the
+-- clipboard on its own -- the user should never have to find this button.
+function RUN.copyAll(quiet)
     -- FAIL/WARN lines go in the header, not just the body: the console keeps
     -- only the last 60 lines, so on a busy run the verdict used to scroll away
     -- and the export showed only a count with no explanation.
@@ -404,7 +406,7 @@ copyBtn.Activated:Connect(function()
         "method  : "..tostring(RETURN_METHOD),
         "antihit : "..tostring(AntiHitEnabled),
         "dodge   : "..(GUARD_SAFE_ZONE and "SAFE ZONE" or "WAYPOINT ROUTE"),
-        "base    : "..BASE_LABEL..(BASE_OVERRIDE and (" "..tostring(BASE_OVERRIDE)) or ""),
+        "base    : "..tostring(BASE_LABEL)..(BASE_CACHED and (" "..tostring(BASE_CACHED)) or ""),
         "selftest: "..SELFTEST.pass.." PASS / "..SELFTEST.fail.." FAIL / "..SELFTEST.warn.." WARN",
     }
     if #problems > 0 then
@@ -417,19 +419,29 @@ copyBtn.Activated:Connect(function()
     table.insert(header, "lines    : "..#logBuffer)
     table.insert(header, "==========================================")
     table.insert(header, "")
+
     local text = table.concat(header, "\n") .. table.concat(logBuffer, "\n")
     local ok   = pcall(function() setclipboard(text) end)
     if not ok then ok = pcall(function() syn.clipboard.set(text) end) end
     if not ok then ok = pcall(function() Clipboard.set(text) end) end
-    copyBtn.Text = ok and "✓  Copied!" or "✗  No clipboard"
-    copyBtn.TextColor3 = ok and LOG_OK or LOG_ERR
-    -- logged last on purpose: this line itself proves the copy succeeded
+
+    if not quiet then
+        copyBtn.Text = ok and "✓  Copied!" or "✗  No clipboard"
+        copyBtn.TextColor3 = ok and LOG_OK or LOG_ERR
+        task.delay(1.5, function()
+            copyBtn.Text      = "📋  Copy All"
+            copyBtn.TextColor3= Color3.fromRGB(130,185,255)
+        end)
+    end
+    -- logged last on purpose: this line itself proves the copy happened
     log(ok and ("Copied "..#logBuffer.." log lines + report header to clipboard")
         or "Could not reach any clipboard API — screenshot the Console tab instead", ok and LOG_OK or LOG_ERR)
-    task.delay(1.5, function()
-        copyBtn.Text      = "📋  Copy All"
-        copyBtn.TextColor3= Color3.fromRGB(130,185,255)
-    end)
+    return ok
+end
+
+copyBtn.Activated:Connect(function()
+    playClick()
+    RUN.copyAll()
 end)
 
 -- ======================================================
@@ -691,14 +703,23 @@ end
 -- stealvip2's DropEgg.POSITION_1 -- the reference's own deposit spot.
 local FALLBACK_BASE = Vector3.new(663,70,-369)
 
--- The old resolver took the FIRST SpawnLocation it found in workspace, which in
--- this game sits at (512,68,-362) -- right in the middle of the egg field, and
--- ~1770 studs from the player. So "return to base" meant "walk 1770 studs back
--- to the middle of the map". Hence: an explicit override the user can set by
--- standing at their real base, and nearest-to-player as the fallback heuristic
--- instead of first-found.
+-- Resolution order, best first. Nothing here needs configuring:
+--   1. BASE_OVERRIDE      (only if the user explicitly set one)
+--   2. Player.RespawnLocation
+--   3. a named base marker -- "vase", "base", "deposit", "home", "safe"
+--   4. a SpawnLocation whose TeamColor matches the player's team
+--   5. the nearest SpawnLocation
+--   6. FALLBACK_BASE
+--
+-- The previous version took the FIRST SpawnLocation in workspace, which sits at
+-- (512,68,-362) in the middle of the egg field -- ~1770 studs from the player,
+-- which is why the return leg crawled. Also resolves ONCE and then stays quiet:
+-- it used to re-log the whole scan on every single run and buried the log.
 BASE_OVERRIDE = nil
 BASE_LABEL   = "auto"
+local BASE_RESOLVED = false
+
+local BASE_KEYWORDS = {"vase", "deposit", "base", "home", "safe", "return"}
 
 local function collectSpawnLocations()
     local list = {}
@@ -709,7 +730,36 @@ local function collectSpawnLocations()
                     name = obj.Name,
                     pos  = obj.Position,
                     team = (obj.TeamColor and obj.TeamColor.Name) or "?",
+                    num  = (obj.TeamColor and obj.TeamColor.Number) or -1,
                 })
+            end
+        end
+    end)
+    return list
+end
+
+-- Anything in the map actually named like a base/vase. The user calls their
+-- base a "vase", so that word is first in the keyword list.
+local function collectNamedBases()
+    local list = {}
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") or obj:IsA("Model") then
+                local n = string.lower(obj.Name)
+                for _, kw in ipairs(BASE_KEYWORDS) do
+                    if string.find(n, kw, 1, true) then
+                        local ok, pos = pcall(function()
+                            if obj:IsA("Model") then
+                                return (obj.PrimaryPart and obj.PrimaryPart.Position) or obj:GetPivot().Position
+                            end
+                            return obj.Position
+                        end)
+                        if ok and pos then
+                            table.insert(list, {name=obj.Name, pos=pos, cls=obj.ClassName})
+                        end
+                        break
+                    end
+                end
             end
         end
     end)
@@ -718,39 +768,62 @@ end
 
 local function getBasePosition()
     if BASE_OVERRIDE then
-        local root0 = getRoot()
-        local d0 = root0 and math.floor((root0.Position - BASE_OVERRIDE).Magnitude) or -1
-        log("Base: OVERRIDE "..BASE_LABEL.." at "..tostring(BASE_OVERRIDE).." ("..d0.." studs)", LOG_INFO)
+        if not BASE_RESOLVED then
+            BASE_RESOLVED = true
+            log("Base: using your override at "..tostring(BASE_OVERRIDE), LOG_OK)
+        end
         return BASE_OVERRIDE
     end
+    if BASE_RESOLVED then return BASE_CACHED end
+
+    local root  = getRoot()
+    local pos, label
 
     local rl = Player.RespawnLocation
-    if rl then
-        log("Base: RespawnLocation '"..rl.Name.."' at "..tostring(rl.Position), LOG_INFO)
-        return rl.Position
+    if rl then pos, label = rl.Position, "RespawnLocation '"..rl.Name.."'" end
+
+    if not pos then
+        local named = collectNamedBases()
+        if #named > 0 then
+            local best, bd = named[1], math.huge
+            for _, e in ipairs(named) do
+                local d = root and (root.Position - e.pos).Magnitude or 0
+                if d < bd then bd = d; best = e end
+            end
+            pos, label = best.pos, "named marker '"..best.name.."' ("..best.cls..")"
+        end
     end
 
-    local list = collectSpawnLocations()
-    if #list == 0 then
-        log("Base: no SpawnLocation found, using FALLBACK "..tostring(FALLBACK_BASE), LOG_WARN)
-        return FALLBACK_BASE
+    if not pos then
+        local list = collectSpawnLocations()
+        if #list > 0 then
+            -- prefer the player's own team
+            local mine
+            for _, e in ipairs(list) do
+                if e.num ~= -1 and e.num == Player.TeamColor.Number then mine = e; break end
+            end
+            if mine then
+                pos, label = mine.pos, "SpawnLocation on your team ('"..mine.name.."')"
+            else
+                local best, bd = list[1], math.huge
+                for _, e in ipairs(list) do
+                    local d = root and (root.Position - e.pos).Magnitude or math.huge
+                    if d < bd then bd = d; best = e end
+                end
+                pos, label = best.pos, "nearest SpawnLocation ('"..best.name.."')"
+            end
+        end
     end
 
-    local root = getRoot()
-    local best, bestD = nil, math.huge
-    log("Base: RespawnLocation nil; "..#list.." SpawnLocation(s) found — pick the right one below:", LOG_WARN)
-    for i, e in ipairs(list) do
-        local d = root and (root.Position - e.pos).Magnitude or math.huge
-        log(string.format("  [%d] '%s' team=%s  %s  %d studs away", i, e.name, e.team,
-            tostring(e.pos), math.floor(d)), d == bestD and LOG_INFO or LOG_INFO)
-        if d < bestD then bestD = d; best = e end
-    end
-    if best then
-        log("Base: auto-picked nearest '"..best.name.."' — WRONG if that isn't your base. "
-            .."Stand at your base and press '📍 Use current position as base'.", LOG_WARN)
-        return best.pos
-    end
-    return FALLBACK_BASE
+    if not pos then pos, label = FALLBACK_BASE, "hardcoded fallback" end
+
+    BASE_CACHED   = pos
+    BASE_LABEL    = label
+    BASE_RESOLVED = true
+    local d = root and math.floor((root.Position - pos).Magnitude) or -1
+    log("Base resolved automatically: "..label.." at "..tostring(pos).." ("..d.." studs)", LOG_OK)
+    log("  wrong? Stand at your base and press 'Use current position as BASE'.", LOG_INFO)
+    return pos
 end
 
 -- ======================================================
@@ -1617,14 +1690,14 @@ end)
 -- ── DEBUG ────────────────────────────────────────────
 cfgLabel("DEBUG")
 
-local selfTestBtn = cfgBtn("🧪  SELF-TEST (read-only, safe)")
+local selfTestBtn = cfgBtn("🧪  Re-run diagnostics (optional)")
 selfTestBtn.TextColor3 = LOG_TEST
 selfTestBtn.Activated:Connect(function()
     playClick()
     task.spawn(runStaticSelfTest)
 end)
 
-local moveTestBtn = cfgBtn("🏃  SELF-TEST movement (moves you)")
+local moveTestBtn = cfgBtn("🏃  Test TP methods (optional, hitches you)")
 moveTestBtn.TextColor3 = LOG_TEST
 moveTestBtn.Activated:Connect(function()
     playClick()
@@ -1669,24 +1742,28 @@ spawnScanBtn.Activated:Connect(function()
     end
 end)
 
-local setBaseBtn = cfgBtn("📍  Use current position as BASE")
+local setBaseBtn = cfgBtn("📍  Base is WRONG? Use my current position")
 setBaseBtn.TextColor3 = LOG_OK
 setBaseBtn.Activated:Connect(function()
     playClick()
     local root = getRoot()
     if not root then log("Base: no HumanoidRootPart", LOG_ERR); return end
     BASE_OVERRIDE = root.Position
-    BASE_LABEL = "current position"
+    BASE_LABEL = "your override"
+    BASE_RESOLVED = false
+    BASE_CACHED = nil
     log("Base set to "..tostring(BASE_OVERRIDE), LOG_OK)
-    log("Auto Run Base will now return HERE. Reload is not needed — it takes effect on the next run.", LOG_INFO)
+    log("Auto Run Base will now return HERE. Takes effect on the next run — no reload needed.", LOG_INFO)
 end)
 
-local clearBaseBtn = cfgBtn("🗑  Clear base override (use auto-detect)")
+local clearBaseBtn = cfgBtn("🗑  Undo base override (optional)")
 clearBaseBtn.Activated:Connect(function()
     playClick()
     BASE_OVERRIDE = nil
     BASE_LABEL = "auto"
-    log("Base override cleared — back to auto-detect", LOG_INFO)
+    BASE_RESOLVED = false
+    BASE_CACHED = nil
+    log("Base override cleared — back to automatic detection", LOG_INFO)
 end)
 
 local carryBtn = cfgBtn("🥚  Check carry status + speed")
@@ -2046,20 +2123,42 @@ end)
 -- ======================================================
 -- STARTUP LOG
 -- ======================================================
+-- Zero-config startup. The user's only manual step should be interacting with
+-- an egg, so everything below happens on its own: diagnostics run, the base is
+-- resolved, Anti Hit switches itself on, and the finished log is pushed to the
+-- clipboard so it can be pasted without touching the GUI.
 task.delay(1, function()
-    log("=== VIREX ANTI-GUARD v4 (Anti Hit + Auto Run Base) ===", LOG_OK)
+    log("=== VIREX ANTI-GUARD v4 — zero-config, just interact with an egg ===", LOG_OK)
     log("loadstring: "..(HAS_LOADSTRING and "available (F9 = reload)" or "UNAVAILABLE"), HAS_LOADSTRING and LOG_OK or LOG_WARN)
-    log("fireproximityprompt: "..(type(fireproximityprompt)=="function" and "available" or "MISSING — re-fire egg prompt will not work"),
-        type(fireproximityprompt)=="function" and LOG_OK or LOG_ERR)
-    log("Return method: "..RETURN_METHOD.."; glide falls back to TP, TP falls back to walk", LOG_INFO)
-    log("Toggle ANTI HIT, then interact with an egg — route runs, then returns home", LOG_INFO)
+    log("fireproximityprompt: "..(type(fireproximityprompt)=="function" and "available" or "MISSING — re-fire is off, fast click still works"),
+        type(fireproximityprompt)=="function" and LOG_OK or LOG_WARN)
+    log("Return method: "..RETURN_METHOD.."  (glide → TP → walk fallback chain, nothing to choose)", LOG_INFO)
+    log("Dodge style: "..(GUARD_SAFE_ZONE and "SAFE ZONE" or "WAYPOINT ROUTE"), LOG_INFO)
 end)
 
--- Read-only self-test a moment later: gives you an immediate verdict on what
--- this client can actually do, with no clicking and nothing moved. Config also
--- exposes 🧪 SELF-TEST to re-run it any time.
 task.delay(2.5, function()
     runStaticSelfTest()
-    log("Config → 🏃 SELF-TEST movement will prove whether TP or GLIDE actually sticks.", LOG_INFO)
-    log("Config → 📋 Copy All exports everything above with a report header.", LOG_INFO)
+
+    -- resolve the base now so the log records what was chosen
+    local okBase, base = pcall(getBasePosition)
+    if not okBase then log("Base: resolution errored: "..tostring(base), LOG_ERR) end
+
+    -- switch Anti Hit on for them
+    if not AntiHitEnabled then
+        AntiHitEnabled = true
+        setAhVisual(true)
+        startFastClick()
+        startGuardWatch()
+        log("ANTI HIT enabled automatically — just walk up to an egg and interact.", LOG_OK)
+    end
+
+    AutoRunEnabled = true
+    setArVisual("on", "ON  •  waits for egg interact")
+
+    -- put the whole report on the clipboard so the only thing left to do is
+    -- interact with an egg and paste
+    task.delay(1.5, function()
+        log("Copying this report to your clipboard automatically — just paste it.", LOG_INFO)
+        RUN.copyAll()
+    end)
 end)
