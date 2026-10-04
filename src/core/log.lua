@@ -139,39 +139,52 @@ end
 --     success. UserInputService:GetClipboardText lets us read it back and check.
 --   * There was no fallback if all of them failed, so the export was
 --     unreachable exactly when it was needed.
+-- SUCCESS IS DECIDED BY THE WRITE, NOT BY THE READ.
+--
+-- The previous version gated every API on UserInputService:GetClipboardText
+-- returning a non-empty string. That is a guaranteed false negative wherever
+-- clipboard reads are restricted: the write succeeds, the read comes back empty
+-- or errors, and all five paths are then reported as failures even though the
+-- clipboard does hold the text. It made a working feature look broken on exactly
+-- the executors that needed it. So a call that did not throw counts as success,
+-- and the read-back is reported as evidence, never used as a gate.
 function M.setClipboard(text)
-    local tried = {}
+    local tried, readBack = {}, nil
 
-    -- 1. Roblox's supported API.
-    local ok, err = pcall(function() GuiService:SetClipboard(text) end)
-    tried[#tried + 1] = ok and "GuiService ok" or ("GuiService: " .. tostring(err))
-    if ok then
-        -- Verify. Only trust it if the text actually came back.
-        local read = nil
-        pcall(function() read = UserInputService:GetClipboardText() end)
-        if type(read) == "string" and #read > 0 then return true, "GuiService (verified)" end
-        tried[#tried + 1] = "GuiService set but clipboard read back empty"
+    local function checkRead()
+        if readBack ~= nil then return end
+        local ok, v = pcall(function() return UserInputService:GetClipboardText() end)
+        readBack = (ok and type(v) == "string" and #v > 0) and v or false
     end
 
-    -- 2. Executor globals. try/catch each, because one throwing must not stop
-    --    the next from being tried.
+    -- 1. Roblox's supported API. First, because it is the only option that does
+    --    not depend on executor globals existing at all.
+    local ok, err = pcall(function() GuiService:SetClipboard(text) end)
+    if ok then
+        checkRead()
+        return true, "GuiService:SetClipboard", readBack
+    end
+    tried[#tried + 1] = "GuiService: " .. tostring(err)
+
+    -- 2. Executor globals, commonest first. The first that does not throw wins.
     for _, spec in ipairs({
-        { "setclipboard", function() setclipboard(text) end },
-        { "syn.clipboard", function() syn.clipboard.set(text) end },
-        { "Clipboard.set", function() Clipboard.set(text) end },
-        { "writeclipboard", function() writeclipboard(text) end },
+        { "setclipboard",        function() setclipboard(text) end },
+        { "syn.clipboard.set",   function() syn.clipboard.set(text) end },
+        { "clipboard.set",       function() clipboard.set(text) end },
+        { "Clipboard.set",       function() Clipboard.set(text) end },
+        { "writeclipboard",      function() writeclipboard(text) end },
+        { "rbxgui_setclipboard", function() rbxgui_setclipboard(text) end },
     }) do
         local success, e = pcall(spec[2])
-        tried[#tried + 1] = success and (spec[1] .. " ok") or (spec[1] .. ": " .. tostring(e))
         if success then
-            local read = nil
-            pcall(function() read = UserInputService:GetClipboardText() end)
-            if type(read) == "string" and #read > 0 then return true, spec[1] .. " (verified)" end
+            checkRead()
+            return true, spec[1], readBack
         end
+        tried[#tried + 1] = spec[1] .. ": " .. tostring(e)
     end
 
     M.lastClipboardError = table.concat(tried, " | ")
-    return false, table.concat(tried, " | ")
+    return false, nil, false, M.lastClipboardError
 end
 
 -- Long strings get refused or silently truncated by some of these APIs, and the
@@ -195,25 +208,29 @@ function M.copyChunk(state, step)
     else M.chunk.i = math.clamp(M.chunk.i + dir, 1, M.chunk.n) end
     local from = (M.chunk.i - 1) * M.CHUNK + 1
     local slice = text:sub(from, from + M.CHUNK - 1)
-    local ok = M.setClipboard(slice)
-    M.write(string.format("Chunk %d/%d copied (%d chars)%s", M.chunk.i, M.chunk.n, #slice,
-        ok and "" or " - clipboard failed again"), ok and M.OK or M.ERR)
+    local ok, how = M.setClipboard(slice)
+    M.write(string.format("Chunk %d/%d -> %d chars via %s", M.chunk.i, M.chunk.n, #slice,
+        tostring(how)), ok and M.OK or M.ERR)
     return ok, M.chunk.i, M.chunk.n
 end
 
 function M.copy(state, quiet)
     local text, nProblems = M.buildReport(state)
-    local ok, how = M.setClipboard(text)
+    local ok, how, readBack, err = M.setClipboard(text)
     if not quiet and M.onCopy then M.onCopy(ok, how, text) end
     if ok then
-        M.write(string.format("Copied %d lines (%d chars) via %s", #M.buffer, #text, how), M.OK)
+        M.write(string.format("Copied %d lines / %d chars via %s", #M.buffer, #text, how), M.OK)
+        if readBack == false then
+            -- Wrote, but could not read it back. Executors commonly block the
+            -- read. Say so rather than implying the copy is in doubt.
+            M.log.write("Clipboard read-back is blocked here so the copy could not be " ..
+                "confirmed. Paste it and check it came through.", M.WARN)
+        end
         if nProblems > 0 then
             M.write("Header lists " .. nProblems .. " problem(s) - they are at the top of the copy.", M.WARN)
         end
     else
-        M.write("Clipboard failed. Tried: " .. tostring(how), M.ERR)
-        M.write("The full text is now in the box below - press Copy Manual, " ..
-            "or long-press and Copy in the menu.", M.WARN)
+        M.log.write("No clipboard API accepted the text. Tried: " .. tostring(err), M.ERR)
     end
     return ok, text
 end

@@ -94,10 +94,12 @@ function M.build(parent)
                 mods.log.clear()
             else
                 local ok, text = mods.log.copy(state)
+                -- Populate the box whether or not the clipboard took it. A
+                -- clipboard this executor refuses must never be the only door
+                -- to the log, because that is exactly how the report got lost.
+                showManual(text)
                 if not ok then
-                    -- Show the text anyway. Never let a clipboard failure leave
-                    -- the user with nothing.
-                    showManual(text)
+                    mods.log.write("Clipboard refused it - use the box below.", mods.log.WARN)
                 end
             end
         end)
