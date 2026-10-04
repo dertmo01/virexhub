@@ -1,45 +1,35 @@
 -- ======================================================
--- VIREX HUB • ANTI-GUARD v3  (Anti-Hit + Instant Steal)
+-- VIREX HUB • ANTI-GUARD v4  (Anti Hit + Auto Run Base)
 -- ======================================================
--- Merged build: original VirexHub GUI (Anti Hit / Auto Run Home / Config /
--- Console) + the "test1" instant-TP steal engine with the sibling modules
--- (WalkGround / TargetSelector / AntiCheat / AutoSteal) inlined so this file
--- is fully self-contained.
+-- Focused build. Two features only:
+--   1. ANTI HIT      — on egg ProximityPrompt, run the dodge route
+--   2. AUTO RUN BASE — return home, by CFrame TP (default) or on foot
 --
--- Steal modes:
---   safe         -> step-walk to the egg (anti-detect)
---   instant      -> CFrame snap to the egg slot, then carry
---   instant-only -> CFrame snap replaces the walk entirely
+-- The instant-TP steal engine and the minimize button were removed: neither
+-- worked, and TP-to-slot never survived server-side position validation.
+-- TP to *base* is a different case (a static, known-safe destination), and
+-- it self-verifies — if the snap doesn't stick it falls back to walking.
 --
 -- ── HOW TO RUN ───────────────────────────────────────
--- Copy this line into your executor:
---
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"))()
 --
--- This file is a bare chunk (no `return`, no `require`) on purpose, so it
--- loads standalone. It will NOT work as a Roblox ModuleScript.
---
--- Config tab has a "Reload script" button + F9 hotkey that re-fetch and
--- re-run this same URL via loadstring while you iterate.
+-- Config tab has "Reload script" + F9 hotkey for the same URL.
+-- This file is a bare chunk (no `return`, no `require`) on purpose.
 -- ======================================================
 
 -- ── RELOAD SAFETY ────────────────────────────────────
--- A reload creates a brand-new closure, so the previous run's Engine/threads
--- can't be stopped by name from here. Keep a handle in the shared global
--- table and shut the old run down before anything else is built.
+-- A reload builds a brand-new closure, so the previous run's threads can't be
+-- stopped by name from here. Keep a handle in the shared global table and
+-- shut the old run down before anything else is built.
 local HOST     = (getgenv and getgenv()) or _G
 local PREVIOUS = rawget(HOST, "VirexHub")
 if type(PREVIOUS) == "table" and type(PREVIOUS.shutdown) == "function" then
     pcall(PREVIOUS.shutdown)
 end
 
-local RUN = {
-    shutdown = function() end, -- replaced further down
-}
+local RUN = { shutdown = function() end }
 
--- ── LOADER (loadstring) ──────────────────────────────
-local SCRIPT_URL = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
-
+local SCRIPT_URL  = "https://raw.githubusercontent.com/dertmo01/virexhub/master/virexhub.lua"
 local HAS_LOADSTRING = (type(loadstring) == "function") or (type(load) == "function")
 
 local function reloadScript()
@@ -66,12 +56,11 @@ local RunService             = game:GetService("RunService")
 local TweenService           = game:GetService("TweenService")
 local SoundService           = game:GetService("SoundService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
-local ReplicatedStorage      = game:GetService("ReplicatedStorage")
 
 local Player    = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
--- ── CLEAN OLD INSTANCES (GUI + stray sound folders) ──
+-- ── CLEAN OLD INSTANCES ──────────────────────────────
 local _oldGui = PlayerGui:FindFirstChild("VirexAntiGuard")
 if _oldGui then _oldGui:Destroy() end
 for _, f in ipairs(SoundService:GetChildren()) do
@@ -79,14 +68,14 @@ for _, f in ipairs(SoundService:GetChildren()) do
 end
 
 -- ── SOUNDS ────────────────────────────────────────────
-local _sfxFolder      = Instance.new("Folder")
-_sfxFolder.Name       = "VirexAntiGuardSFX"
-_sfxFolder.Parent     = SoundService
-local _clickSFX       = Instance.new("Sound")
-_clickSFX.Name        = "Click"
-_clickSFX.SoundId     = "rbxassetid://6026984224"
-_clickSFX.Volume      = 0.30
-_clickSFX.Parent      = _sfxFolder
+local _sfxFolder  = Instance.new("Folder")
+_sfxFolder.Name   = "VirexAntiGuardSFX"
+_sfxFolder.Parent = SoundService
+local _clickSFX   = Instance.new("Sound")
+_clickSFX.Name    = "Click"
+_clickSFX.SoundId = "rbxassetid://6026984224"
+_clickSFX.Volume  = 0.30
+_clickSFX.Parent  = _sfxFolder
 
 local function playClick(speed, vol)
     pcall(function()
@@ -174,15 +163,13 @@ subLabel.Font=Enum.Font.FredokaOne; subLabel.Text="ANTI-GUARD"; subLabel.TextSiz
 subLabel.TextXAlignment=Enum.TextXAlignment.Center; subLabel.TextColor3=Color3.fromRGB(145,145,155)
 subLabel.Parent=topBar
 
-local function makeTopBtn(text,ox)
-    local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(30,28)
-    b.Position=UDim2.new(1,ox,0,8); b.AnchorPoint=Vector2.new(1,0)
-    b.BackgroundColor3=Themes[1].Panel; b.BorderSizePixel=0
-    b.Text=text; b.Font=Enum.Font.FredokaOne; b.TextSize=14
-    b.TextColor3=Color3.new(1,1,1); b.AutoButtonColor=false; b.Parent=topBar
-    Instance.new("UICorner",b).CornerRadius=UDim.new(0,8); return b
-end
-local btnMinimize=makeTopBtn("—",-52); local btnClose=makeTopBtn("×",-8)
+-- Only a close button now (minimize removed).
+local btnClose=Instance.new("TextButton"); btnClose.Size=UDim2.fromOffset(30,28)
+btnClose.Position=UDim2.new(1,-8,0,8); btnClose.AnchorPoint=Vector2.new(1,0)
+btnClose.BackgroundColor3=Themes[1].Panel; btnClose.BorderSizePixel=0
+btnClose.Text="×"; btnClose.Font=Enum.Font.FredokaOne; btnClose.TextSize=14
+btnClose.TextColor3=Color3.new(1,1,1); btnClose.AutoButtonColor=false; btnClose.Parent=topBar
+Instance.new("UICorner",btnClose).CornerRadius=UDim.new(0,8)
 
 -- DRAG HANDLE
 local dragHandle=Instance.new("TextButton"); dragHandle.Name="DragHandle"
@@ -334,10 +321,10 @@ copyBtn.Text="📋  Copy All"; copyBtn.Font=Enum.Font.FredokaOne; copyBtn.TextSi
 copyBtn.TextColor3=Color3.fromRGB(130,185,255); copyBtn.AutoButtonColor=false; copyBtn.Parent=consoleBtnRow
 Instance.new("UICorner",copyBtn).CornerRadius=UDim.new(0,7)
 
-local LOG_OK  = Color3.fromRGB(110,255,145)
-local LOG_ERR = Color3.fromRGB(255,100,100)
-local LOG_WARN= Color3.fromRGB(255,200,60)
-local LOG_INFO= Color3.fromRGB(130,185,255)
+local LOG_OK   = Color3.fromRGB(110,255,145)
+local LOG_ERR  = Color3.fromRGB(255,100,100)
+local LOG_WARN = Color3.fromRGB(255,200,60)
+local LOG_INFO = Color3.fromRGB(130,185,255)
 
 local function log(msg, color)
     color = color or Color3.fromRGB(200,200,210)
@@ -394,42 +381,34 @@ copyBtn.Activated:Connect(function()
 end)
 
 -- ======================================================
--- MODULE 1 : WalkGround  (inlined)
+-- HELPERS
 -- ======================================================
-local WalkGround = {}
-WalkGround.__index = WalkGround
-
-function WalkGround.getHumanoid(localPlayer)
-    local char = localPlayer and localPlayer.Character
+local function getHumanoid()
+    local char = Player.Character
     if not char then return nil end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if hum then return hum end
-    return char:WaitForChild("Humanoid", 5)
+    return char:FindFirstChildOfClass("Humanoid")
 end
 
-function WalkGround.getRoot(localPlayer)
-    local char = localPlayer and localPlayer.Character
+local function getRoot()
+    local char = Player.Character
     if not char then return nil end
     return char:FindFirstChild("HumanoidRootPart")
 end
 
--- Nukes common knockback / pushback controllers so walks are not interrupted.
 local PUSHBACK_NAMES = {
     "Pushback","PushBack","AntiPushback","KnockbackController",
     "Knockback","StunController","Stunned","Stun","Freeze","Frozen",
 }
-function WalkGround.stripPushBack(localPlayer)
-    local char = localPlayer and localPlayer.Character
+local function stripPushBack()
+    local char = Player.Character
     if not char then return false end
     local hit = false
     for _, name in ipairs(PUSHBACK_NAMES) do
         for _, obj in ipairs(char:GetChildren()) do
-            if obj.Name == name then
-                pcall(function() obj:Destroy(); hit = true end)
-            end
+            if obj.Name == name then pcall(function() obj:Destroy(); hit = true end) end
         end
     end
-    local root = WalkGround.getRoot(localPlayer)
+    local root = getRoot()
     if root then
         pcall(function()
             local v = root.AssemblyLinearVelocity
@@ -440,847 +419,59 @@ function WalkGround.stripPushBack(localPlayer)
     return hit
 end
 
--- ======================================================
--- MODULE 2 : TargetSelector  (inlined)
--- ======================================================
-local TargetSelector = {}
-TargetSelector.__index = TargetSelector
-
-TargetSelector.RARITY_ORDER = {
-    "Secret","Legendary","Mythic","Exotic","Ultra","Rare","Uncommon","Common",
-}
-
-local EGG_CONTAINERS = {
-    "AreaEggSlotsClient","EggSlotsClient","EggsClient","EggContainer",
-    "EggWorldClient","Eggs","EggList",
-}
-
-local AllScannedEggs = {}          -- [{Uid, Instance, Rarity, Position}]
-local SelectedRarities = {}        -- rarity -> true
-for _, r in ipairs(TargetSelector.RARITY_ORDER) do SelectedRarities[r] = true end
-
--- ── EGG CONFIG INDEX ─────────────────────────────────
--- Rarity isn't on the egg instance; it lives in a config table somewhere in
--- ReplicatedStorage keyed by egg id. Build the index once, then look up by
--- full name, numeric id, or slot base name (any of the three can match).
-local EggConfigIndex = nil
-
-local function indexConfigTable(tbl, out, depth)
-    if type(tbl) ~= "table" or depth > 3 then return end
-    for key, val in pairs(tbl) do
-        if type(val) == "table" then
-            local rarity = val.Rarity or val.EggRarity or val.RarityName
-            if type(rarity) == "string" then
-                if type(key) == "string" or type(key) == "number" then
-                    out[tostring(key)] = rarity
-                end
-                for _, idk in ipairs({"Id","ID","EggId","Name","Uid","UID"}) do
-                    if type(val[idk]) == "string" or type(val[idk]) == "number" then
-                        out[tostring(val[idk])] = rarity
-                    end
-                end
-            end
-            indexConfigTable(val, out, depth + 1)
-        end
-    end
-end
-
-local function buildEggConfigIndex()
-    if EggConfigIndex then return EggConfigIndex end
-    EggConfigIndex = {}
-    local roots = { ReplicatedStorage }
-    local pkgs = ReplicatedStorage:FindFirstChild("Packages")
-    if pkgs then table.insert(roots, pkgs) end
-
-    for _, root in ipairs(roots) do
-        for _, obj in ipairs(root:GetDescendants()) do
-            local n = string.lower(obj.Name or "")
-            if string.find(n, "egg", 1, true) then
-                local got = false
-                if obj:IsA("RemoteFunction") then
-                    local ok, val = pcall(function() return obj:InvokeServer() end)
-                    if ok and type(val) == "table" then indexConfigTable(val, EggConfigIndex, 0); got = true end
-                elseif obj:IsA("ModuleScript") then
-                    local ok, val = pcall(function() return require(obj) end)
-                    if ok and type(val) == "table" then indexConfigTable(val, EggConfigIndex, 0); got = true end
-                elseif obj:IsA("Folder") or obj:IsA("Configuration") then
-                    for k, v in pairs(obj:GetAttributes()) do
-                        if typeof(v) == "string" and string.find(string.lower(k), "rarity", 1, true) then
-                            EggConfigIndex[obj.Name] = v; got = true
-                        end
-                    end
-                end
-                if got then log("EggConfig indexed from "..obj:GetFullName(), LOG_INFO) end
-            end
-        end
-    end
-    return EggConfigIndex
-end
-
--- Pull candidate lookup keys out of names like
--- FirstAreaEgg_10605759721_5970123_Forest:Slot_002
-local function nameCandidates(name)
-    local out = { name }
-    local id  = string.match(name, "(%d+)")
-    if id then table.insert(out, id) end
-    local base = string.match(name, "^(.-):Slot")
-    if base then
-        table.insert(out, base)
-        local bid = string.match(base, "(%d+)")
-        if bid then table.insert(out, bid) end
-    end
-    return out
-end
-
-local function readRarity(obj, model)
-    -- 1) attributes on the container entry / model
-    local objs = { obj }
-    if model and model ~= obj then table.insert(objs, model) end
-    for _, o in ipairs(objs) do
-        for _, key in ipairs({"Rarity","EggRarity","RarityName","Tier"}) do
-            local v = o:GetAttribute(key)
-            if typeof(v) == "string" and v ~= "" then return v end
-        end
-    end
-    -- 2) rarity-named children (StringValue / ObjectValue)
-    if model then
-        for _, d in ipairs(model:GetDescendants()) do
-            for _, key in ipairs({"Rarity","EggRarity","RarityName","Tier"}) do
-                local v = d:GetAttribute(key)
-                if typeof(v) == "string" and v ~= "" then return v end
-            end
-            if d:IsA("StringValue") and string.find(string.lower(d.Name), "rarity", 1, true) then
-                if d.Value ~= "" then return d.Value end
-            elseif d:IsA("ObjectValue") and d.Value then
-                local vn = string.lower(d.Value.Name)
-                for _, r in ipairs(TargetSelector.RARITY_ORDER) do
-                    if string.find(vn, string.lower(r), 1, true) then return r end
-                end
-            end
-        end
-    end
-    -- 3) config index
-    local idx = buildEggConfigIndex()
-    for _, cand in ipairs(nameCandidates(obj.Name)) do
-        if idx[cand] then return idx[cand] end
-    end
-    return "Common"
-end
-
-local function resolveModel(obj)
-    if obj:IsA("Model") then return obj end
-    if obj:IsA("ObjectValue") and obj.Value and obj.Value.Parent then return obj.Value end
-    if obj:IsA("Folder") then
-        local m = obj:FindFirstChildWhichIsA("Model")
-        return m
-    end
-    return obj
-end
-
-function TargetSelector.scanEggs()
-    AllScannedEggs = {}
-    local seen = {}
-    local function addEntry(inst, model)
-        if not model then return end
-        local okId, id = pcall(function() return model:GetDebugId() end)
-        local key = (okId and id) or tostring(model)
-        if seen[key] then return end
-        seen[key] = true
-
-        -- This game drives egg pickup off a ProximityPrompt living on a
-        -- part called SmartPromptPart, so the prompt is the real handle.
-        local prompt = nil
-        pcall(function() prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true) end)
-
-        local pos = nil
-        local part = (prompt and prompt.Parent)
-            or model.PrimaryPart
-            or model:FindFirstChildWhichIsA("BasePart", true)
-        if part and part:IsA("BasePart") then pos = part.Position end
-
-        table.insert(AllScannedEggs, {
-            Uid     = inst.Name,
-            Instance= model,
-            Rarity  = readRarity(inst, model),
-            Position= pos,
-            Prompt  = prompt,
-            PromptPart = (prompt and prompt.Parent) or nil,
-            HoldDuration = (prompt and prompt.HoldDuration) or 0,
-        })
-    end
-
-    for _, cname in ipairs(EGG_CONTAINERS) do
-        local container = workspace:FindFirstChild(cname)
-        if container then
-            for _, inst in ipairs(container:GetChildren()) do
-                addEntry(inst, resolveModel(inst))
-            end
-        end
-    end
-
-    -- fallback: any Model in workspace with an egg-ish name
-    if #AllScannedEggs == 0 then
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("Model") then
-                local n = string.lower(obj.Name)
-                if string.find(n, "egg", 1, true) then addEntry(obj, obj) end
-            end
-        end
-    end
-
-    -- make sure every discovered rarity is selected by default
-    for _, e in ipairs(AllScannedEggs) do
-        if SelectedRarities[e.Rarity] == nil then SelectedRarities[e.Rarity] = true end
-    end
-
-    local withPrompt = 0
-    for _, e in ipairs(AllScannedEggs) do if e.Prompt then withPrompt += 1 end end
-    log(string.format("Scan: %d eggs, %d with a ProximityPrompt", #AllScannedEggs, withPrompt),
-        withPrompt > 0 and LOG_OK or LOG_ERR)
-    return AllScannedEggs
-end
-
-function TargetSelector.getSlotPosition(egg)
-    if type(egg) == "table" then
-        -- Prefer the live prompt position when we have one, else the
-        -- cached position from the scan.
-        if egg.PromptPart and egg.PromptPart.Parent then
-            return egg.PromptPart.Position
-        end
-        if egg.Position then return egg.Position end
-        egg = egg.Instance
-    end
-    if not egg then return nil end
-    local promptPart = nil
-    pcall(function() promptPart = egg:FindFirstChild("SmartPromptPart", true) end)
-    local part = promptPart
-        or egg:FindFirstChild("Spawn", true)
-        or egg.PrimaryPart
-        or egg:FindFirstChildWhichIsA("BasePart", true)
-    if not part then return nil end
-    local p = part.Position
-    local alt = egg:FindFirstChild("AltInteractPoint", true)
-    if alt and alt:IsA("BasePart") then p = alt.Position end
-    return p
-end
-
-function TargetSelector.setRarity(rarity, on)
-    SelectedRarities[rarity] = on and true or false
-end
-
-function TargetSelector.isRaritySelected(rarity)
-    return SelectedRarities[rarity] == true
-end
-
-local Blacklisted = {}   -- uid -> os.clock() expiry
-
-function TargetSelector.markFailed(uid, seconds)
-    if not uid then return end
-    Blacklisted[uid] = os.clock() + (seconds or 25)
-end
-
-function TargetSelector.clearFailed(uid)
-    if uid then Blacklisted[uid] = nil end
-end
-
-function TargetSelector.isBlocked(uid)
-    local untilTime = Blacklisted[uid]
-    if not untilTime then return false end
-    if os.clock() >= untilTime then Blacklisted[uid] = nil; return false end
-    return true
-end
-
-function TargetSelector._sortedRarities(present)
-    local out = {}
-    for _, r in ipairs(TargetSelector.RARITY_ORDER) do
-        if present[r] then table.insert(out, r) end
-    end
-    return out
-end
-
--- Highest-priority egg inside MaxRange; nil if none match.
--- `skip` holds uids the caller already rejected this cycle.
-function TargetSelector.pickTarget(localPlayer, maxRange, skip)
-    skip = skip or {}
-    if #AllScannedEggs == 0 then TargetSelector.scanEggs() end
-    local root = WalkGround.getRoot(localPlayer)
-    if not root then return nil end
-    maxRange = maxRange or 1e9
-
-    local byRarity = {}
-    for _, e in ipairs(AllScannedEggs) do
-        local reject = TargetSelector.isBlocked(e.Uid)
-        if not reject and skip[e.Uid] then reject = true end
-        if not reject and TargetSelector.isRaritySelected(e.Rarity) and e.Position then
-            local d = (e.Position - root.Position).Magnitude
-            if d <= maxRange then
-                byRarity[e.Rarity] = byRarity[e.Rarity] or {}
-                table.insert(byRarity[e.Rarity], {egg=e, dist=d})
-            end
-        end
-    end
-
-    for _, rarity in ipairs(TargetSelector._sortedRarities(byRarity)) do
-        local list = byRarity[rarity]
-        table.sort(list, function(a,b) return a.dist < b.dist end)
-        return list[1].egg
-    end
-    return nil
-end
-
--- ======================================================
--- MODULE 3 : AntiCheat  (inlined)
--- ======================================================
-local AntiCheat = {}
-AntiCheat.__index = AntiCheat
-
-local AC_HINTS = {
-    "anticheat","anti_cheat","validate","validation","checkmove","movementcheck",
-    "checkspeed","speedcheck","positioncheck","exploit","kickcheck","cframecheck",
-    "teleportcheck","distancecheck",
-}
-
-function AntiCheat.findValidationConnections()
-    local result = { connections = {}, scripts = {} }
-    local seenScript, seenConn = {}, {}
-
-    local function scan(root)
-        if not root then return end
-        for _, obj in ipairs(root:GetDescendants()) do
-            if (obj:IsA("LocalScript") or obj:IsA("ModuleScript")) and not seenScript[obj] then
-                seenScript[obj] = true
-                table.insert(result.scripts, obj)
-            end
-        end
-    end
-
-    scan(Player:FindFirstChildOfClass("PlayerScripts"))
-    scan(PlayerGui)
-    local okRS, rs = pcall(function() return ReplicatedStorage end)
-    if okRS and rs then scan(rs) end
-
-    for _, scr in ipairs(result.scripts) do
-        local ok, conns = pcall(getconnections, scr)
-        if ok and type(conns) == "table" then
-            for _, c in ipairs(conns) do
-                if not seenConn[c] then
-                    local hit = false
-                    -- match by source-line info of the connected function
-                    pcall(function()
-                        local fn = c.Function
-                        if type(fn) == "function" then
-                            local info = string.lower(tostring(debug.info(fn, "sl") or ""))
-                            for _, hint in ipairs(AC_HINTS) do
-                                if string.find(info, hint, 1, true) then hit = true; break end
-                            end
-                            if not hit then
-                                local up = string.lower(tostring(debug.info(fn, "n") or ""))
-                                for _, hint in ipairs(AC_HINTS) do
-                                    if string.find(up, hint, 1, true) then hit = true; break end
-                                end
-                            end
-                        end
-                    end)
-                    if hit then
-                        seenConn[c] = true
-                        table.insert(result.connections, c)
-                    end
-                end
-            end
-        end
-    end
-    return result
-end
-
-function AntiCheat.disableValidationConnections(connections)
-    local n = 0
-    for _, c in ipairs(connections or {}) do
-        pcall(function() c:Disconnect(); n = n + 1 end)
-    end
-    return n
-end
-
--- ======================================================
--- MODULE 4 : AutoSteal  (inlined)
--- ======================================================
-local CARRY_REMOTE_NAMES = {
-    ["RF/EggWorld/AskFieldEggCarry"] = true,
-    AskFieldEggCarry = true, CarryEgg = true, PickUpEgg = true,
-    EggCarry = true, TakeEgg = true,
-}
-local DROP_REMOTE_NAMES = {
-    DropEgg = true, ["RF/EggWorld/DropFieldEgg"] = true, DropFieldEgg = true, ReleaseEgg = true,
-}
-
-local function findRemote(nameMap)
-    local packages = ReplicatedStorage:FindFirstChild("Packages")
-    local net = packages and packages:FindFirstChild("Networking")
-    local roots = { net, ReplicatedStorage, workspace }
-    for _, root in ipairs(roots) do
-        if root then
-            for _, obj in ipairs(root:GetDescendants()) do
-                if nameMap[obj.Name] and (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then
-                    return obj
-                end
-            end
-        end
-    end
-    return nil
-end
-
-local CarryRemote = findRemote(CARRY_REMOTE_NAMES)
-local DropRemote  = findRemote(DROP_REMOTE_NAMES)
-
-local AutoSteal = {}
-AutoSteal.__index = AutoSteal
-
-local STEAL_DEFAULTS = {
-    WalkSpeed       = 120,
-    MaxRange        = 900,
-    ApproachDist    = 6,
-    StepDelay       = 0.06,
-    CarryTimeout    = 1.2,
-    CarryMethod     = "prompt",   -- "prompt" | "remote" | "both"
-    FailureCooldown = 25,
-    AutoReturn      = true,
-    AutoDropEgg     = false,
-}
-
-local FALLBACK_BASE = Vector3.new(533,70,-366)
-
-function AutoSteal.new(options)
-    options = options or {}
-    local self = setmetatable({}, AutoSteal)
-    self._localPlayer = options.LocalPlayer or Player
-    self._config = table.clone(STEAL_DEFAULTS)
-    if type(options.Config) == "table" then
-        for k,v in pairs(options.Config) do self._config[k] = v end
-    end
-    self._onComplete = options.OnComplete
-    self._running = false
-    return self
-end
-
-function AutoSteal:SetConfig(patch)
-    if type(patch) ~= "table" then return end
-    for k,v in pairs(patch) do self._config[k] = v end
-end
-function AutoSteal:GetConfig() return self._config end
-function AutoSteal:GetLocalPlayer() return self._localPlayer end
-function AutoSteal:IsRunning() return self._running end
-function AutoSteal:SetOnComplete(fn) self._onComplete = fn end
-function AutoSteal:_fireComplete(ok, info)
-    if self._onComplete then pcall(self._onComplete, ok, info) end
-end
-
-function AutoSteal:_basePosition()
-    local rl = self._localPlayer.RespawnLocation
-    if rl then return rl.Position end
-    local ok, found = pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("SpawnLocation") then return obj.Position end
-        end
-        return nil
+-- Instant snap with verification. Returns true only if we actually landed —
+-- if the server rubber-bands us back, we say so instead of pretending.
+local function tpTo(position, offsetY)
+    local root = getRoot()
+    local hum  = getHumanoid()
+    if not root or not hum then return false end
+    local dest = position + Vector3.new(0, offsetY or 0, 0)
+    pcall(function()
+        hum:MoveTo(root.Position)
+        hum.WalkSpeed = 0
+        root.CFrame = CFrame.new(dest)
+        root.AssemblyLinearVelocity  = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
     end)
-    if ok and found then return found end
-    return FALLBACK_BASE
+    -- give the server a moment to correct us, then check
+    task.wait(0.12)
+    local r = getRoot()
+    if not r then return false end
+    return (r.Position - dest).Magnitude <= 8
 end
 
-function AutoSteal:_isCarrying()
-    local plr = self._localPlayer
-    local char = plr.Character
-    if char then
-        for _, key in ipairs({"CarryingEgg","CarryingEggUid","Carrying","HasEgg","EggUID","EggUid"}) do
-            local v = char:GetAttribute(key)
-            if v ~= nil and v ~= false and v ~= "" then return true end
-        end
-        for _, key in ipairs({"CarryingEgg","Carrying","HasEgg","EggUID","EggUid"}) do
-            local v = plr:GetAttribute(key)
-            if v ~= nil and v ~= false and v ~= "" then return true end
-        end
-        local tool = char:FindFirstChildOfClass("Tool")
-        if tool and string.find(string.lower(tool.Name), "egg", 1, true) then return true end
-        for _, obj in ipairs(char:GetChildren()) do
-            if obj.Name == "EggCarry" or obj.Name == "CarryingEgg" then return true end
-        end
-    end
-    local backpack = plr:FindFirstChildOfClass("Backpack")
-    if backpack then
-        for _, obj in ipairs(backpack:GetChildren()) do
-            if obj:IsA("Tool") and string.find(string.lower(obj.Name), "egg", 1, true) then return true end
-        end
+-- Fire the egg's ProximityPrompt. This is what actually picks the egg up in
+-- this game; the AskFieldEggCarry remote alone does nothing on its own.
+local function fireEggPrompt(prompt)
+    if not prompt then return false end
+    if type(fireproximityprompt) == "function" then
+        return pcall(fireproximityprompt, prompt) or false
     end
     return false
 end
 
--- ── CARRY ────────────────────────────────────────────
--- Two mechanisms, tried in the order the config asks for:
---   "prompt" → fireproximityprompt on the egg's ProximityPrompt.
---              This is what the game actually listens to; the remote alone
---              never moves the egg.
---   "remote" → AskFieldEggCarry:InvokeServer with several plausible arg
---              shapes, since we don't know the server's expected signature.
--- Returns true if a mechanism dispatched without error (not proof of pickup
--- — always re-check _isCarrying).
-function AutoSteal:_tryCarry(egg)
-    if type(egg) == "string" then egg = { Uid = egg } end
-    if not egg then return false end
-    local method = self._config.CarryMethod or "prompt"
-    local uid    = egg.Uid
-    local prompt = egg.Prompt
+local FALLBACK_BASE = Vector3.new(533,70,-366)
 
-    -- refresh the handle in case the container rebuilt
-    if (not prompt or not prompt.Parent) and egg.Instance then
-        pcall(function() prompt = egg.Instance:FindFirstChildWhichIsA("ProximityPrompt", true) end)
-        egg.Prompt = prompt
+local function getBasePosition()
+    local rl = Player.RespawnLocation
+    if rl then
+        log("Base: RespawnLocation '"..rl.Name.."' at "..tostring(rl.Position), LOG_INFO)
+        return rl.Position
     end
-
-    local dispatched = false
-
-    if (method == "prompt" or method == "both") and prompt then
-        if type(fireproximityprompt) == "function" then
-            dispatched = pcall(fireproximityprompt, prompt) or dispatched
-        else
-            log("fireproximityprompt missing — cannot use prompt carry", LOG_ERR)
-        end
-    end
-
-    if method == "remote" or method == "both" or (not dispatched) then
-        if CarryRemote then
-            for _, arg in ipairs({ uid, { uid }, egg.Instance }) do
-                local ok = pcall(function() CarryRemote:InvokeServer(arg) end)
-                if ok then dispatched = true end
+    log("Base: RespawnLocation nil, scanning workspace...", LOG_WARN)
+    local found = nil
+    pcall(function()
+        for _,obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("SpawnLocation") then
+                log("Base: SpawnLocation '"..obj.Name.."' at "..tostring(obj.Position), LOG_INFO)
+                found = obj.Position; break
             end
         end
-    end
-
-    -- Hold-duration prompts need a moment of simulated input on some
-    -- executors; give the prompt a nudge if nothing registered.
-    if not self:_isCarrying() and prompt then
-        task.defer(function()
-            pcall(function()
-                prompt.HoldDuration = 0
-                prompt.RequiresLineOfSight = false
-                prompt.MaxActivationDistance = 128
-                if type(fireproximityprompt) == "function" then fireproximityprompt(prompt) end
-            end)
-        end)
-    end
-
-    return dispatched
-end
-
-function AutoSteal:_tryDrop()
-    if not DropRemote then return false end
-    local uid = Player.Character and (Player.Character:GetAttribute("CarryingEggUid") or Player.Character:GetAttribute("EggUid"))
-    if uid == nil then uid = Player:GetAttribute("CarryingEggUid") end
-    if uid == nil then return false end
-    return pcall(function() DropRemote:InvokeServer(uid) end)
-end
-
--- Safe step-walk: walk toward the egg, then carry, then return.
-function AutoSteal:RunOnce()
-    if self._running then return end
-    local plr  = self._localPlayer
-    local root = WalkGround.getRoot(plr)
-    local hum  = WalkGround.getHumanoid(plr)
-    if not root or not hum then return end
-    self._running = true
-
-    WalkGround.stripPushBack(plr)
-    local prevSpeed = hum.WalkSpeed
-    pcall(function() hum.WalkSpeed = self._config.WalkSpeed end)
-
-    local function restoreSpeed()
-        local h = WalkGround.getHumanoid(plr)
-        if h then pcall(function() h.WalkSpeed = prevSpeed end) end
-    end
-
-    if self:_isCarrying() then
-        if self._config.AutoReturn then self:_safeReturn() end
-        if self._config.AutoDropEgg  then self:_tryDrop() end
-        restoreSpeed(); self._running = false
-        self:_fireComplete(true, "carrying")
-        return
-    end
-
-    local egg = TargetSelector.pickTarget(plr, self._config.MaxRange)
-    if not egg then
-        restoreSpeed(); self._running = false
-        self:_fireComplete(false, "no target")
-        return
-    end
-
-    local pos = TargetSelector.getSlotPosition(egg)
-    if not pos then
-        restoreSpeed(); self._running = false
-        self:_fireComplete(false, "no slot position")
-        return
-    end
-
-    log("Steal[walk]: approaching "..egg.Uid.." ("..egg.Rarity..")", LOG_INFO)
-    local deadline = os.clock() + 25
-    while os.clock() < deadline do
-        local r = WalkGround.getRoot(plr)
-        local h = WalkGround.getHumanoid(plr)
-        if not r or not h or h.Health <= 0 then break end
-        if (r.Position - pos).Magnitude <= self._config.ApproachDist then break end
-        WalkGround.stripPushBack(plr)
-        pcall(function() h.WalkSpeed = self._config.WalkSpeed; h:MoveTo(pos) end)
-        task.wait(self._config.StepDelay)
-    end
-
-    -- carry retry window
-    local cdl = os.clock() + self._config.CarryTimeout
-    while os.clock() < cdl do
-        self:_tryCarry(egg)
-        if self:_isCarrying() then break end
-        task.wait(0.08)
-    end
-    local carrying = self:_isCarrying()
-
-    if carrying then
-        TargetSelector.clearFailed(egg.Uid)
-    else
-        -- stop hammering this egg; move on to the next one for a while
-        TargetSelector.markFailed(egg.Uid, self._config.FailureCooldown)
-        log("Steal[walk]: FAILED "..egg.Uid.." — skipping for "..math.floor(self._config.FailureCooldown).."s", LOG_ERR)
-    end
-
-    if carrying and self._config.AutoReturn then self:_safeReturn() end
-    if carrying and self._config.AutoDropEgg  then self:_tryDrop() end
-
-    restoreSpeed(); self._running = false
-    self:_fireComplete(carrying, carrying and "ok" or "grab failed")
-    if carrying then log("Steal[walk]: grabbed "..egg.Uid, LOG_OK) end
-end
-
-function AutoSteal:_safeReturn()
-    local plr  = self._localPlayer
-    local base = self:_basePosition()
-    if not base then return end
-    local dest = base + Vector3.new(0,5,0)
-    local dl = os.clock() + 20
-    while os.clock() < dl do
-        local r = WalkGround.getRoot(plr)
-        local h = WalkGround.getHumanoid(plr)
-        if not r or not h or h.Health <= 0 then return end
-        if (r.Position - dest).Magnitude <= 12 then return end
-        WalkGround.stripPushBack(plr)
-        pcall(function() h:MoveTo(dest) end)
-        task.wait(self._config.StepDelay)
-    end
-end
-
--- ======================================================
--- MODULE 5 : Test1  (instant-TP steal engine)
--- ======================================================
-local Test1 = {}
-Test1.__index = Test1
-
-local TEST1_DEFAULTS = {
-    InstantTP       = false,
-    InstantOnly     = false,
-    BypassAntiCheat = true,
-    GrabDelay       = 0.55,
-    ReturnOffsetY   = 5,
-    CycleDelay      = 0.2,
-}
-
-function Test1.new(options)
-    options = options or {}
-    local self = setmetatable({}, Test1)
-
-    self._localPlayer = options.LocalPlayer or Players.LocalPlayer
-    self._config = table.clone(TEST1_DEFAULTS)
-    self:SetConfig(options.Config)
-
-    self._autoSteal = options.AutoSteal
-        or AutoSteal.new({
-            LocalPlayer = self._localPlayer,
-            Config = options.StealConfig,
-        })
-
-    self._enabled = false
-    self._thread  = nil
-    self._bypassed = false
-    self._stops   = 0
-    self._stats   = { grabs = 0, cycles = 0, fails = 0 }
-    return self
-end
-
-function Test1:SetConfig(patch)
-    if typeof(patch) ~= "table" then return end
-    for k,v in pairs(patch) do self._config[k] = v end
-end
-function Test1:GetConfig() return self._config end
-function Test1:GetStats() return self._stats end
-
-function Test1:SetMode(mode)
-    if mode == "instant-only" or mode == "only" then
-        self._config.InstantOnly = true
-        self._config.InstantTP   = true
-    elseif mode == "instant" then
-        self._config.InstantOnly = false
-        self._config.InstantTP   = true
-    else
-        self._config.InstantOnly = false
-        self._config.InstantTP   = false
-    end
-end
-
-function Test1:GetMode()
-    if self._config.InstantOnly then return "instant-only" end
-    if self._config.InstantTP   then return "instant" end
-    return "safe"
-end
-
-function Test1:SetOnComplete(fn) self._autoSteal:SetOnComplete(fn) end
-function Test1:GetSteal() return self._autoSteal end
-function Test1:IsEnabled() return self._enabled end
-
--- raw one-frame teleport, returns true on success
-function Test1.teleportInstant(localPlayer, position)
-    local humanoid = WalkGround.getHumanoid(localPlayer)
-    local root     = WalkGround.getRoot(localPlayer)
-    if not humanoid or not root then return false end
-    local previousSpeed = humanoid.WalkSpeed
-    local ok = pcall(function()
-        humanoid:MoveTo(root.Position)
-        humanoid.WalkSpeed = 0
-        root.CFrame = CFrame.new(position)
-        root.AssemblyLinearVelocity  = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
     end)
-    if ok then
-        task.delay(0.1, function()
-            if humanoid and humanoid.Parent then
-                pcall(function() humanoid.WalkSpeed = previousSpeed end)
-            end
-        end)
-    end
-    return ok
+    if found then return found end
+    log("Base: none found, using FALLBACK "..tostring(FALLBACK_BASE), LOG_WARN)
+    return FALLBACK_BASE
 end
-
-function Test1:_bypassOnce()
-    if self._bypassed or not self._config.BypassAntiCheat then return end
-    self._bypassed = true
-    local found = AntiCheat.findValidationConnections()
-    local disabled = AntiCheat.disableValidationConnections(found.connections)
-    if disabled and disabled > 0 then
-        log("AntiCheat: disabled "..disabled.." validation connection(s)", LOG_WARN)
-    else
-        log("AntiCheat: no validation connections found", LOG_WARN)
-    end
-end
-
-function Test1:_cycle()
-    if self._config.InstantOnly or self._config.InstantTP then
-        self:_instantCycle()
-    else
-        self._autoSteal:RunOnce()
-    end
-end
-
-function Test1:_instantCycle()
-    local autoSteal = self._autoSteal
-    if autoSteal:_isCarrying() then
-        if autoSteal._config.AutoReturn then self:_instantReturn() end
-        if autoSteal._config.AutoDropEgg  then autoSteal:_tryDrop() end
-        return
-    end
-    local target = TargetSelector.pickTarget(autoSteal._localPlayer, autoSteal._config.MaxRange)
-    if not target then
-        self._stats.idle = (self._stats.idle or 0) + 1
-        return
-    end
-    self:_instantSteal(target)
-end
-
-function Test1:_instantSteal(egg)
-    local autoSteal  = self._autoSteal
-    local localPlayer= autoSteal._localPlayer
-    local uid        = egg.Uid
-    local position   = TargetSelector.getSlotPosition(egg)
-    local root       = WalkGround.getRoot(localPlayer)
-    if not root or not position then return false end
-
-    self:_bypassOnce()
-    WalkGround.stripPushBack(localPlayer)
-    Test1.teleportInstant(localPlayer, position)
-
-    local deadline = os.clock() + self._config.GrabDelay
-    while os.clock() < deadline and self._enabled do
-        if autoSteal:_isCarrying() then task.wait(0.05); break end
-        autoSteal:_tryCarry(egg)
-        if autoSteal:_isCarrying() then task.wait(0.05); break end
-        task.wait(0.03)
-    end
-
-    local carrying = autoSteal:_isCarrying()
-    if carrying then
-        self._stats.grabs += 1
-        TargetSelector.clearFailed(uid)
-        log("Steal[instant]: grabbed "..uid, LOG_OK)
-        if autoSteal._config.AutoReturn then self:_instantReturn() end
-        if autoSteal._config.AutoDropEgg  then autoSteal:_tryDrop() end
-    else
-        self._stats.fails += 1
-        TargetSelector.markFailed(uid, autoSteal._config.FailureCooldown)
-        log("Steal[instant]: FAILED "..uid, LOG_ERR)
-    end
-    return carrying
-end
-
-function Test1:_instantReturn()
-    local autoSteal = self._autoSteal
-    local base = autoSteal:_basePosition()
-    if base then
-        Test1.teleportInstant(autoSteal._localPlayer, base + Vector3.new(0, self._config.ReturnOffsetY, 0))
-    end
-end
-
-function Test1:Enable()
-    if self._enabled then return end
-    self._enabled = true
-    self._thread = task.spawn(function()
-        while self._enabled do
-            local ok, err = pcall(function() self:_cycle() end)
-            self._stats.cycles += 1
-            if not ok then log("Steal cycle error: "..tostring(err), LOG_ERR) end
-            task.wait(self._config.CycleDelay)
-        end
-    end)
-end
-
-function Test1:Disable()
-    self._enabled = false
-    self._thread = nil
-end
-
--- ── one shared instance ───────────────────────────────
-local Engine = Test1.new({
-    LocalPlayer = Player,
-    Config = {
-        InstantTP       = false,
-        InstantOnly     = false,
-        BypassAntiCheat = true,
-        GrabDelay       = 0.55,
-        ReturnOffsetY   = 5,
-        CycleDelay      = 0.20,
-    },
-    StealConfig = {
-        WalkSpeed       = 120,
-        MaxRange        = 900,
-        ApproachDist    = 6,
-        StepDelay       = 0.06,
-        CarryTimeout    = 1.20,
-        CarryMethod     = "prompt",
-        FailureCooldown = 25,
-        AutoReturn      = true,
-        AutoDropEgg     = false,
-    },
-})
 
 -- ======================================================
 -- FEATURE 1 : ANTI HIT
@@ -1335,7 +526,7 @@ end
 local function setAhVisual(on)
     if on then
         ahCard.BackgroundColor3=Color3.fromRGB(35,170,75)
-        ahStatus.Text="ON  •  fires on egg interact"
+        ahStatus.Text="ON  •  dodges on egg interact"
         ahStatus.TextColor3=LOG_OK
         animAhSweep(Color3.fromRGB(35,170,75))
     else
@@ -1346,154 +537,41 @@ local function setAhVisual(on)
     end
 end
 
-local function runAntiHitRoute(character)
-    local root=character and character:FindFirstChild("HumanoidRootPart")
-    if not root then log("AntiHit: no HumanoidRootPart!",LOG_ERR); return end
-    AntiHitRunning=true
-    log("AntiHit: route started",LOG_OK)
+local function runAntiHitRoute()
+    local root = getRoot()
+    if not root then log("AntiHit: no HumanoidRootPart!", LOG_ERR); return end
+    AntiHitRunning = true
+    log("AntiHit: route started", LOG_OK)
     for i,pos in ipairs(ROUTE_WAYPOINTS) do
         if not AntiHitEnabled or not root.Parent then
-            log("AntiHit: cancelled at waypoint "..i,LOG_WARN); break
+            log("AntiHit: cancelled at waypoint "..i, LOG_WARN); break
         end
-        root.CFrame=CFrame.new(pos)
+        root.CFrame = CFrame.new(pos)
         task.wait(ANTI_HIT_STEP)
     end
-    AntiHitRunning=false
-    log("AntiHit: route done",LOG_OK)
+    AntiHitRunning = false
+    log("AntiHit: route done", LOG_OK)
 end
 
 ahCard.Activated:Connect(function()
-    playClick(); AntiHitEnabled=not AntiHitEnabled; setAhVisual(AntiHitEnabled)
+    playClick(); AntiHitEnabled = not AntiHitEnabled; setAhVisual(AntiHitEnabled)
     log("AntiHit toggled: "..(AntiHitEnabled and "ON" or "OFF"), AntiHitEnabled and LOG_OK or LOG_WARN)
 end)
 setAhVisual(false)
 
 -- ======================================================
--- FEATURE 2 : INSTANT STEAL  (test1 engine, GUI front-end)
+-- FEATURE 2 : AUTO RUN BASE
 -- ======================================================
-local StealEnabled = false
-
-local stCard = Instance.new("TextButton")
-stCard.Size=UDim2.new(1,-8,0,74); stCard.BackgroundColor3=Color3.fromRGB(18,55,105)
-stCard.BorderSizePixel=0; stCard.Text=""; stCard.AutoButtonColor=false; stCard.Parent=scriptsPage
-Instance.new("UICorner",stCard).CornerRadius=UDim.new(0,11)
-
-local stSweep=Instance.new("UIGradient"); stSweep.Rotation=0; stSweep.Offset=Vector2.new(1.15,0)
-stSweep.Color=mkSeq(Color3.fromRGB(18,55,105)); stSweep.Parent=stCard
-
-local stTitle=Instance.new("TextLabel"); stTitle.BackgroundTransparency=1
-stTitle.Position=UDim2.fromOffset(13,5); stTitle.Size=UDim2.new(1,-86,0,26)
-stTitle.Text="🥚  INSTANT STEAL"; stTitle.Font=Enum.Font.FredokaOne; stTitle.TextSize=14
-stTitle.TextColor3=Color3.new(1,1,1); stTitle.TextXAlignment=Enum.TextXAlignment.Left
-stTitle.ZIndex=stCard.ZIndex+2; stTitle.Parent=stCard
-
-local stStatus=Instance.new("TextLabel"); stStatus.BackgroundTransparency=1
-stStatus.Position=UDim2.fromOffset(14,33); stStatus.Size=UDim2.new(1,-86,0,18)
-stStatus.Text="OFF  •  mode: SAFE"; stStatus.Font=Enum.Font.FredokaOne; stStatus.TextSize=10
-stStatus.TextColor3=Color3.fromRGB(170,200,255); stStatus.TextXAlignment=Enum.TextXAlignment.Left
-stStatus.ZIndex=stCard.ZIndex+2; stStatus.Parent=stCard
-
-local stStats=Instance.new("TextLabel"); stStats.BackgroundTransparency=1
-stStats.Position=UDim2.fromOffset(14,51); stStats.Size=UDim2.new(1,-86,0,16)
-stStats.Text="grabs 0  •  cycles 0  •  fails 0"; stStats.Font=Enum.Font.Code; stStats.TextSize=9
-stStats.TextColor3=Color3.fromRGB(150,160,175); stStats.TextXAlignment=Enum.TextXAlignment.Left
-stStats.ZIndex=stCard.ZIndex+2; stStats.Parent=stCard
-
-local stBtn=Instance.new("TextButton")
-stBtn.Size=UDim2.new(0,64,0,26); stBtn.Position=UDim2.new(1,-11,0,24); stBtn.AnchorPoint=Vector2.new(1,0)
-stBtn.BackgroundColor3=Color3.fromRGB(30,30,38); stBtn.BorderSizePixel=0
-stBtn.Text="START"; stBtn.Font=Enum.Font.FredokaOne; stBtn.TextSize=10
-stBtn.TextColor3=LOG_OK; stBtn.AutoButtonColor=false; stBtn.ZIndex=stCard.ZIndex+3; stBtn.Parent=stCard
-Instance.new("UICorner",stBtn).CornerRadius=UDim.new(0,7)
-
-local stToken=0
-local function animStSweep(c)
-    stToken+=1; local tok=stToken; stSweep.Color=mkSeq(c)
-    task.spawn(function()
-        while gui.Parent and stCard.Parent and stToken==tok do
-            stSweep.Offset=Vector2.new(1.15,0)
-            tw(stSweep,TweenInfo.new(1.45,Enum.EasingStyle.Linear),{Offset=Vector2.new(-1.15,0)}).Completed:Wait()
-        end
-    end)
-end
-
-local function refreshStealStats()
-    local s = Engine:GetStats()
-    stStats.Text = string.format("grabs %d  •  cycles %d  •  fails %d", s.grabs, s.cycles, s.fails)
-end
-
-local function setStVisual()
-    local mode = Engine:GetMode()
-    if StealEnabled then
-        stCard.BackgroundColor3 = Color3.fromRGB(35,170,75)
-        stStatus.Text  = "ON  •  mode: "..string.upper(mode)
-        stStatus.TextColor3 = LOG_OK
-        stBtn.Text = "STOP"; stBtn.TextColor3 = LOG_ERR
-        animStSweep(Color3.fromRGB(35,170,75))
-    else
-        stCard.BackgroundColor3 = Color3.fromRGB(18,55,105)
-        stStatus.Text  = "OFF  •  mode: "..string.upper(mode)
-        stStatus.TextColor3 = Color3.fromRGB(170,200,255)
-        stBtn.Text = "START"; stBtn.TextColor3 = LOG_OK
-        animStSweep(Color3.fromRGB(18,55,105))
-    end
-end
-
-local function startEngine()
-    if StealEnabled then return end
-    local eggs = TargetSelector.scanEggs()
-    if #eggs == 0 then
-        log("Steal: no eggs discovered — run Config > Scan Eggs", LOG_ERR)
-    else
-        local counts = {}
-        for _, e in ipairs(eggs) do counts[e.Rarity] = (counts[e.Rarity] or 0) + 1 end
-        local parts = {}
-        for r, c in pairs(counts) do table.insert(parts, r.."x"..c) end
-        log("Steal: found "..#eggs.." eggs ["..table.concat(parts, ", ").."]", LOG_INFO)
-    end
-    StealEnabled = true
-    Engine:Enable()
-    setStVisual()
-    log("Steal engine STARTED (mode="..Engine:GetMode()..")", LOG_WARN)
-end
-
-local function stopEngine()
-    if not StealEnabled then return end
-    StealEnabled = false
-    Engine:Disable()
-    setStVisual()
-    refreshStealStats()
-    log("Steal engine STOPPED", LOG_WARN)
-end
-
-stCard.Activated:Connect(function()
-    playClick()
-    if StealEnabled then stopEngine() else startEngine() end
-end)
-stBtn.Activated:Connect(function()
-    playClick()
-    if StealEnabled then stopEngine() else startEngine() end
-end)
-setStVisual()
-
--- live stats ticker
-task.spawn(function()
-    while gui.Parent and stCard.Parent do
-        task.wait(0.5)
-        pcall(refreshStealStats)
-    end
-end)
-
--- ======================================================
--- FEATURE 3 : AUTO RUN HOME
--- ======================================================
-local ARRIVE_DIST   = 30
-local RUN_SPEED     = 300
-local WALK_TIMEOUT  = 90
+local RETURN_TP   = true    -- true = CFrame snap, false = walk
+local TP_OFFSET   = 5
+local RUN_SPEED   = 300
+local ARRIVE_DIST = 30
+local WALK_TIMEOUT = 90
+local GRAB_EGG    = true
 
 local AutoRunEnabled = false
 local AutoRunning    = false
-local CurrentEggUid  = nil
+local CurrentEggPrompt = nil
 
 local _originalWalkSpeed = 150
 pcall(function()
@@ -1514,44 +592,20 @@ local function startSpeedForce()
             if _speedConn then _speedConn:Disconnect() end
             _speedConn = nil; return
         end
-        local char = Player.Character
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local hum = getHumanoid()
         if hum and hum.Health > 0 then pcall(function() hum.WalkSpeed = RUN_SPEED end) end
     end)
 end
 
 local function stopSpeedForce()
     if _speedConn then _speedConn:Disconnect(); _speedConn = nil end
-    local char = Player.Character
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    local hum = getHumanoid()
     if hum then pcall(function() hum.WalkSpeed = _originalWalkSpeed end) end
-end
-
-local function getBasePosition()
-    local rl = Player.RespawnLocation
-    if rl then
-        log("Base: RespawnLocation '"..rl.Name.."' at "..tostring(rl.Position), LOG_INFO)
-        return rl.Position
-    end
-    log("Base: RespawnLocation nil, scanning workspace...", LOG_WARN)
-    local found = nil
-    pcall(function()
-        for _,obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("SpawnLocation") then
-                log("Base: SpawnLocation '"..obj.Name.."' at "..tostring(obj.Position), LOG_INFO)
-                found = obj.Position; break
-            end
-        end
-    end)
-    if found then return found end
-    log("Base: none found, using FALLBACK "..tostring(FALLBACK_BASE), LOG_WARN)
-    return FALLBACK_BASE
 end
 
 local arCard=Instance.new("TextButton")
 arCard.Size=UDim2.new(1,-8,0,58); arCard.BackgroundColor3=Color3.fromRGB(18,55,105)
 arCard.BorderSizePixel=0; arCard.Text=""; arCard.AutoButtonColor=false; arCard.Parent=scriptsPage
-arCard.Visible=false
 Instance.new("UICorner",arCard).CornerRadius=UDim.new(0,11)
 
 local arSweep=Instance.new("UIGradient"); arSweep.Rotation=0; arSweep.Offset=Vector2.new(1.15,0)
@@ -1559,7 +613,7 @@ arSweep.Color=mkSeq(Color3.fromRGB(18,55,105)); arSweep.Parent=arCard
 
 local arTitle=Instance.new("TextLabel"); arTitle.BackgroundTransparency=1
 arTitle.Position=UDim2.fromOffset(13,5); arTitle.Size=UDim2.new(1,-26,0,26)
-arTitle.Text="🏃  AUTO RUN HOME"; arTitle.Font=Enum.Font.FredokaOne; arTitle.TextSize=13
+arTitle.Text="🏠  AUTO RUN BASE"; arTitle.Font=Enum.Font.FredokaOne; arTitle.TextSize=14
 arTitle.TextColor3=Color3.new(1,1,1); arTitle.TextXAlignment=Enum.TextXAlignment.Left
 arTitle.ZIndex=arCard.ZIndex+2; arTitle.Parent=arCard
 
@@ -1587,7 +641,7 @@ local function setArVisual(state, txt)
         animArSweep(Color3.fromRGB(105,72,12))
     elseif state=="on" then
         arCard.BackgroundColor3=Color3.fromRGB(35,120,200)
-        arStatus.TextColor3=Color3.fromRGB(130,185,255)
+        arStatus.TextColor3=LOG_INFO
         animArSweep(Color3.fromRGB(35,120,200))
     else
         arCard.BackgroundColor3=Color3.fromRGB(18,55,105)
@@ -1598,68 +652,76 @@ local function setArVisual(state, txt)
 end
 
 local function stopAutoRun(reason)
-    AutoRunning=false
+    AutoRunning = false
     stopSpeedForce()
-    log("AutoRun: STOPPED — "..(reason or "done"),LOG_WARN)
-    if AutoRunEnabled then setArVisual("on","ON  •  waiting for egg pickup")
+    log("AutoRun: STOPPED — "..(reason or "done"), LOG_WARN)
+    if AutoRunEnabled then setArVisual("on","ON  •  waits for egg interact")
     else setArVisual("off","OFF") end
 end
 
 local function startAutoRun()
-    if AutoRunning then log("AutoRun: already running, skip",LOG_WARN); return end
-    -- The walk loop below is gated on AutoRunEnabled, and this function is
-    -- also reached from the prompt handler without the (hidden) card ever
-    -- being toggled — so enable it here or the loop exits instantly.
+    if AutoRunning then log("AutoRun: already running, skip", LOG_WARN); return end
+    -- The walk loop is gated on AutoRunEnabled, and this is also reached from
+    -- the prompt handler without the card ever being toggled — so enable it
+    -- here or the loop exits instantly.
     AutoRunEnabled = true
-    AutoRunning=true
-    log("AutoRun: START — MOVING TO BASE (speed="..RUN_SPEED..")",LOG_OK)
-    setArVisual("running","Running to base...")
+    AutoRunning = true
+    setArVisual("running", RETURN_TP and "Teleporting to base..." or "Running to base...")
 
     task.spawn(function()
         local target = getBasePosition()
-        local char = Player.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
-        if not char or not root or not hum then
-            log("AutoRun: missing character/root/humanoid", LOG_ERR)
-            stopAutoRun("no character"); return
-        end
 
-        local uid = CurrentEggUid
-        if uid == nil and char then uid = char:GetAttribute("CarryingEggUid") end
-        if uid then
-            log("AutoRun: attempting to carry egg '"..tostring(uid).."'", LOG_INFO)
-            -- Route through the engine so this uses the same carry mechanism
-            -- (prompt-first) that the steal path uses.
-            local prompt = nil
-            for _, e in ipairs(AllScannedEggs) do
-                if e.Uid == uid then prompt = e.Prompt; break end
+        -- pick the egg back up on the way out, if we caught a prompt
+        if GRAB_EGG and CurrentEggPrompt then
+            log("AutoRun: re-firing egg prompt", LOG_INFO)
+            if fireEggPrompt(CurrentEggPrompt) then
+                log("AutoRun: egg prompt fired", LOG_OK)
+            else
+                log("AutoRun: fireproximityprompt unavailable or failed", LOG_WARN)
             end
-            Engine:GetSteal():_tryCarry({ Uid = uid, Prompt = prompt })
-            log("AutoRun: carry dispatched", LOG_OK)
-            task.wait(0.2)
+            task.wait(0.25)
         end
 
-        startSpeedForce()
-        local startTime = tick()
-        local TIMEOUT = WALK_TIMEOUT
-
-        while AutoRunning and AutoRunEnabled do
-            local c = Player.Character
-            local h = c and c:FindFirstChildOfClass("Humanoid")
-            local r = c and c:FindFirstChild("HumanoidRootPart")
-            if not h or not r then stopSpeedForce(); log("AutoRun: lost humanoid/root", LOG_ERR); stopAutoRun("lost root"); return end
-            if h.Health <= 0 then stopSpeedForce(); log("AutoRun: died", LOG_ERR); stopAutoRun("dead"); return end
-            local dist = (r.Position - target).Magnitude
-            if dist <= ARRIVE_DIST then stopSpeedForce(); log("AutoRun: ARRIVED at base!", LOG_OK); break end
-            if tick() - startTime > TIMEOUT then
-                stopSpeedForce()
-                log("AutoRun: timeout after "..math.floor(tick()-startTime).."s", LOG_WARN)
-                stopAutoRun("timeout"); return
+        if RETURN_TP then
+            local ok = tpTo(target, TP_OFFSET)
+            if ok then
+                log("AutoRun: ARRIVED at base (TP)", LOG_OK)
+            else
+                log("AutoRun: TP was rejected / rubber-banded — falling back to walking", LOG_WARN)
+                setArVisual("running","TP failed, walking...")
+                RETURN_TP = false
             end
-            pcall(function() h:MoveTo(target) end)
-            task.wait(0.1)
         end
+
+        if not RETURN_TP then
+            startSpeedForce()
+            local startTime = tick()
+            while AutoRunning and AutoRunEnabled do
+                local hum = getHumanoid()
+                local root = getRoot()
+                if not hum or not root then
+                    stopSpeedForce(); log("AutoRun: lost humanoid/root", LOG_ERR)
+                    stopAutoRun("lost root"); return
+                end
+                if hum.Health <= 0 then
+                    stopSpeedForce(); log("AutoRun: died", LOG_ERR)
+                    stopAutoRun("dead"); return
+                end
+                local dist = (root.Position - target).Magnitude
+                if dist <= ARRIVE_DIST then
+                    stopSpeedForce(); log("AutoRun: ARRIVED at base (walk)", LOG_OK); break
+                end
+                if tick() - startTime > WALK_TIMEOUT then
+                    stopSpeedForce()
+                    log("AutoRun: timeout after "..math.floor(tick()-startTime).."s", LOG_WARN)
+                    stopAutoRun("timeout"); return
+                end
+                stripPushBack()
+                pcall(function() hum.WalkSpeed = RUN_SPEED; hum:MoveTo(target) end)
+                task.wait(0.1)
+            end
+        end
+
         stopSpeedForce()
         stopAutoRun("done")
     end)
@@ -1668,57 +730,51 @@ end
 arCard.Activated:Connect(function()
     playClick()
     if AutoRunning then
-        AutoRunEnabled=false; stopAutoRun("user cancelled")
+        AutoRunEnabled = false; stopAutoRun("user cancelled")
     else
-        AutoRunEnabled=not AutoRunEnabled
+        AutoRunEnabled = not AutoRunEnabled
         log("AutoRun toggled: "..(AutoRunEnabled and "ON" or "OFF"), AutoRunEnabled and LOG_OK or LOG_WARN)
-        if AutoRunEnabled then setArVisual("on","ON  •  waiting for egg pickup"); task.spawn(startAutoRun)
-        else setArVisual("off","OFF") end
+        if AutoRunEnabled then
+            setArVisual("on","ON  •  waits for egg interact")
+            task.spawn(startAutoRun)
+        else
+            setArVisual("off","OFF")
+        end
     end
 end)
 setArVisual("off","OFF")
 
 -- ── ProximityPrompt wiring ────────────────────────────
-
 -- prompt.Parent is the part hosting the prompt ("SmartPromptPart"), not the
--- egg. Walk up the ancestor chain looking for the real egg holder, and prefer
--- a name that matches something already in the egg scan.
-local function resolveEggUidFromPrompt(prompt)
-    local scanned = {}
-    if #AllScannedEggs == 0 then TargetSelector.scanEggs() end
-    for _, e in ipairs(AllScannedEggs) do scanned[e.Uid] = true end
-
+-- egg. Walk up the ancestor chain to name the real egg for the log.
+local function resolveEggName(prompt)
     local cur = prompt.Parent
     for _ = 1, 10 do
         if not cur then break end
-        if scanned[cur.Name] then return cur.Name end
         local n = string.lower(cur.Name)
         if string.find(n, "egg", 1, true) and not string.find(n, "prompt", 1, true) then
             return cur.Name
         end
         cur = cur.Parent
     end
-    return prompt.Parent and prompt.Parent.Name or nil
+    return prompt.Parent and prompt.Parent.Name or "?"
 end
 
 ProximityPromptService.PromptTriggered:Connect(function(prompt, player)
     if player ~= Player then return end
 
-    local uid = resolveEggUidFromPrompt(prompt)
-    if uid then
-        CurrentEggUid = uid
-        log("AntiHit: captured egg = "..uid, LOG_INFO)
-    end
+    CurrentEggPrompt = prompt
+    local eggName = resolveEggName(prompt)
+    log("Prompt fired: "..eggName, LOG_INFO)
 
-    log("ProximityPrompt fired! AntiHit="..(AntiHitEnabled and "ON" or "OFF"), LOG_INFO)
     if not AntiHitEnabled or AntiHitRunning then
-        log("ProximityPrompt: skipped (AntiHit off or running)", LOG_WARN); return
+        log("Prompt: anti-hit skipped (off or already running)", LOG_WARN); return
     end
-    local character = Player.Character
-    if not character then log("ProximityPrompt: no character!", LOG_ERR); return end
+    if not Player.Character then log("Prompt: no character!", LOG_ERR); return end
+
     task.spawn(function()
-        runAntiHitRoute(character)
-        log("AntiHit: route finished, auto-running home...", LOG_OK)
+        runAntiHitRoute()
+        log("AntiHit: route finished, heading home...", LOG_OK)
         task.wait(0.5)
         if not AutoRunning then startAutoRun() end
     end)
@@ -1751,16 +807,13 @@ local function segBtn(parent, xS, xO, text)
     Instance.new("UICorner",b).CornerRadius=UDim.new(0,9); return b
 end
 
--- generic value stepper  (label + [−] value [+])
 local function makeStepper(labelText, initValue, minV, maxV, step, fmt, onChange)
     cfgLabel(labelText)
     local row=Instance.new("Frame"); row.Size=UDim2.new(1,-8,0,40)
     row.BackgroundTransparency=1; row.Parent=configPage
-
     local dec = segBtn(row, 0.22, 0, "−"); dec.TextSize=16
     local val = segBtn(row, 0.56, 0.22, ""); val.TextSize=12
     local inc = segBtn(row, 0.22, 0.78, "+"); inc.TextSize=16
-
     local value = initValue
     local function refresh() val.Text = fmt and fmt(value) or tostring(value) end
     dec.Activated:Connect(function()
@@ -1775,7 +828,6 @@ local function makeStepper(labelText, initValue, minV, maxV, step, fmt, onChange
     return { Get=function() return value end, Set=function(v) value=v; refresh() end }
 end
 
--- generic toggle row
 local function makeToggle(labelText, initState, onChange)
     local row=Instance.new("TextButton"); row.Size=UDim2.new(1,-8,0,40)
     row.BackgroundColor3=Color3.fromRGB(24,24,30); row.BorderSizePixel=0; row.Text=""
@@ -1794,7 +846,6 @@ local function makeToggle(labelText, initState, onChange)
     lbl.Text=labelText; lbl.Font=Enum.Font.FredokaOne; lbl.TextSize=11
     lbl.TextColor3=Color3.fromRGB(225,225,235); lbl.TextXAlignment=Enum.TextXAlignment.Left
     lbl.Parent=row
-
     local state = initState and true or false
     local function refresh()
         dot.BackgroundColor3 = state and LOG_OK or Color3.fromRGB(70,70,80)
@@ -1808,193 +859,50 @@ local function makeToggle(labelText, initState, onChange)
     return { Get=function() return state end, Set=function(v) state=v and true or false; refresh() end }
 end
 
--- ── STEAL MODE (segmented) ───────────────────────────
-cfgLabel("STEAL MODE")
-local modeRow=Instance.new("Frame"); modeRow.Size=UDim2.new(1,-8,0,40)
-modeRow.BackgroundTransparency=1; modeRow.Parent=configPage
-local modeSafe   = segBtn(modeRow, 0.335, 0,     "SAFE")
-local modeInst   = segBtn(modeRow, 0.335, 0.335, "INSTANT")
-local modeOnly   = segBtn(modeRow, 0.33,  0.67,  "ONLY")
-
-local function refreshModeButtons()
-    local m = Engine:GetMode()
-    local sel, col = modeSafe, Color3.fromRGB(35,170,75)
-    if m == "instant" then sel = modeInst elseif m == "instant-only" then sel = modeOnly end
-    for _, b in ipairs({modeSafe, modeInst, modeOnly}) do
-        b.BackgroundColor3 = (b == sel) and col or Themes[1].Panel
-    end
-    setStVisual()
+-- ── RETURN METHOD ────────────────────────────────────
+cfgLabel("RETURN TO BASE")
+local retRow=Instance.new("Frame"); retRow.Size=UDim2.new(1,-8,0,40)
+retRow.BackgroundTransparency=1; retRow.Parent=configPage
+local retTP   = segBtn(retRow, 0.5, 0,   "⚡ TELEPORT")
+local retWalk = segBtn(retRow, 0.5, 0.5, "🚶 WALK")
+local function refreshRetButtons()
+    retTP.BackgroundColor3   = RETURN_TP   and Color3.fromRGB(35,120,200) or Themes[1].Panel
+    retWalk.BackgroundColor3 = (not RETURN_TP) and Color3.fromRGB(35,120,200) or Themes[1].Panel
 end
-modeSafe.Activated:Connect(function() playClick(); Engine:SetMode("safe");       refreshModeButtons(); log("Steal mode = SAFE", LOG_INFO) end)
-modeInst.Activated:Connect(function() playClick(); Engine:SetMode("instant");    refreshModeButtons(); log("Steal mode = INSTANT", LOG_WARN) end)
-modeOnly.Activated:Connect(function() playClick(); Engine:SetMode("instant-only");refreshModeButtons(); log("Steal mode = INSTANT-ONLY", LOG_WARN) end)
-refreshModeButtons()
-
--- ── CARRY METHOD ─────────────────────────────────────
-cfgLabel("CARRY METHOD  (how the egg is picked up)")
-local carryRow=Instance.new("Frame"); carryRow.Size=UDim2.new(1,-8,0,40)
-carryRow.BackgroundTransparency=1; carryRow.Parent=configPage
-local carryPrompt = segBtn(carryRow, 0.335, 0,     "PROMPT")
-local carryRemote = segBtn(carryRow, 0.335, 0.335, "REMOTE")
-local carryBoth   = segBtn(carryRow, 0.33,  0.67,  "BOTH")
-local function refreshCarryButtons()
-    local cur = Engine:GetSteal():GetConfig().CarryMethod
-    local sel = (cur == "remote") and carryRemote or (cur == "both" and carryBoth or carryPrompt)
-    for _, b in ipairs({carryPrompt, carryRemote, carryBoth}) do
-        b.BackgroundColor3 = (b == sel) and Color3.fromRGB(35,120,200) or Themes[1].Panel
-    end
-end
-local function setCarryMethod(m)
-    playClick(); Engine:GetSteal():SetConfig({CarryMethod=m}); refreshCarryButtons()
-    log("Carry method = "..m..(m == "prompt" and (type(fireproximityprompt)=="function" and "" or "  (fireproximityprompt MISSING!)")), LOG_INFO)
-end
-carryPrompt.Activated:Connect(function() setCarryMethod("prompt") end)
-carryRemote.Activated:Connect(function() setCarryMethod("remote") end)
-carryBoth.Activated:Connect(function()   setCarryMethod("both") end)
-refreshCarryButtons()
-
-if type(fireproximityprompt) ~= "function" then
-    log("fireproximityprompt not available in this executor — use REMOTE or BOTH", LOG_ERR)
-end
-
--- ── STEAL TUNING ─────────────────────────────────────
-makeStepper("GRAB DELAY  (sec)", 0.55, 0.10, 3.00, 0.05, function(v) return string.format("%.2f s", v) end,
-    function(v) Engine:SetConfig({GrabDelay=v}) end)
-
-makeStepper("CYCLE DELAY  (sec)", 0.20, 0.05, 5.00, 0.05, function(v) return string.format("%.2f s", v) end,
-    function(v) Engine:SetConfig({CycleDelay=v}) end)
-
-makeStepper("RETURN OFFSET  (studs)", 5, 0, 30, 1, function(v) return tostring(v) end,
-    function(v) Engine:SetConfig({ReturnOffsetY=v}) end)
-
-makeStepper("STEAL WALK SPEED", 120, 16, 400, 10, function(v) return tostring(v) end,
-    function(v) Engine:GetSteal():SetConfig({WalkSpeed=v}) end)
-
-makeStepper("STEAL MAX RANGE  (studs)", 900, 50, 5000, 50, function(v) return tostring(v) end,
-    function(v) Engine:GetSteal():SetConfig({MaxRange=v}) end)
-
-makeStepper("FAIL COOLDOWN  (sec)", 25, 5, 180, 5, function(v) return v.." s" end,
-    function(v) Engine:GetSteal():SetConfig({FailureCooldown=v}) end)
-
-makeToggle("BYPASS ANTI-CHEAT", true, function(on)
-    Engine:SetConfig({BypassAntiCheat=on})
-    if not on then log("AntiCheat bypass disabled", LOG_INFO) end
+retTP.Activated:Connect(function()
+    playClick(); RETURN_TP = true; refreshRetButtons()
+    log("Return method = TELEPORT (self-verifying)", LOG_INFO)
 end)
-
-makeToggle("AUTO RETURN TO BASE", true, function(on) Engine:GetSteal():SetConfig({AutoReturn=on}) end)
-makeToggle("AUTO DROP EGG",      false, function(on) Engine:GetSteal():SetConfig({AutoDropEgg=on}) end)
-
--- ── EGG SCAN + RARITY FILTER ─────────────────────────
-local rarityFrame = Instance.new("Frame")
-rarityFrame.Size=UDim2.new(1,-8,0,0); rarityFrame.AutomaticSize=Enum.AutomaticSize.Y
-rarityFrame.BackgroundTransparency=1; rarityFrame.Parent=configPage
-local rarityLayout=Instance.new("UIListLayout"); rarityLayout.Padding=UDim.new(0,4)
-rarityLayout.SortOrder=Enum.SortOrder.LayoutOrder; rarityLayout.Parent=rarityFrame
-local rarityButtons = {}
-
-local function rebuildRarityList()
-    for _, b in ipairs(rarityButtons) do if b.Parent then b:Destroy() end end
-    rarityButtons = {}
-    local eggs = AllScannedEggs
-    if #eggs == 0 then TargetSelector.scanEggs(); eggs = AllScannedEggs end
-    local counts = {}
-    for _, e in ipairs(eggs) do counts[e.Rarity] = (counts[e.Rarity] or 0) + 1 end
-    local order = {}
-    for _, r in ipairs(TargetSelector.RARITY_ORDER) do if counts[r] then table.insert(order, r) end end
-    for r in pairs(counts) do
-        local known = false
-        for _, x in ipairs(order) do if x == r then known = true end end
-        if not known then table.insert(order, r) end
-    end
-    table.sort(order, function(a,b) return (counts[a] or 0) > (counts[b] or 0) end)
-
-    if #order == 0 then
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,0,0,24)
-        l.BackgroundTransparency=1; l.Text="(no eggs scanned yet)"
-        l.Font=Enum.Font.Code; l.TextSize=9; l.TextColor3=Color3.fromRGB(140,140,150)
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=rarityFrame
-        rarityButtons[#rarityButtons+1] = l
-        return
-    end
-
-    for i, r in ipairs(order) do
-        local on = TargetSelector.isRaritySelected(r)
-        local b=Instance.new("TextButton"); b.Size=UDim2.new(1,0,0,30)
-        b.BackgroundColor3 = on and Color3.fromRGB(28,80,50) or Color3.fromRGB(26,26,32)
-        b.BorderSizePixel=0; b.LayoutOrder=i; b.Text=""
-        b.AutoButtonColor=false; b.Parent=rarityFrame
-        Instance.new("UICorner",b).CornerRadius=UDim.new(0,8)
-        local t=Instance.new("TextLabel"); t.BackgroundTransparency=1
-        t.Size=UDim2.new(1,-12,1,0); t.Position=UDim2.fromOffset(10,0)
-        t.Text=(on and "✔  " or "✖  ")..r.."  ("..(counts[r] or 0)..")"
-        t.Font=Enum.Font.FredokaOne; t.TextSize=10
-        t.TextColor3 = on and LOG_OK or Color3.fromRGB(150,150,160)
-        t.TextXAlignment=Enum.TextXAlignment.Left; t.Parent=b
-        b.Activated:Connect(function()
-            playClick()
-            local newOn = not TargetSelector.isRaritySelected(r)
-            TargetSelector.setRarity(r, newOn)
-            rebuildRarityList()
-        end)
-        rarityButtons[#rarityButtons+1] = b
-    end
-end
-
-local scanBtn = cfgBtn("🔍  Scan Eggs")
-scanBtn.Activated:Connect(function()
-    playClick()
-    log("=== EGG SCAN ===", LOG_INFO)
-    local eggs = TargetSelector.scanEggs()
-    if #eggs == 0 then log("No eggs found (containers missing)", LOG_ERR) else
-        local counts = {}
-        for _, e in ipairs(eggs) do counts[e.Rarity] = (counts[e.Rarity] or 0) + 1 end
-        for r, c in pairs(counts) do log("  "..r.." x"..c, LOG_INFO) end
-        log("Found "..#eggs.." eggs", LOG_OK)
-    end
-    rebuildRarityList()
+retWalk.Activated:Connect(function()
+    playClick(); RETURN_TP = false; refreshRetButtons()
+    log("Return method = WALK", LOG_INFO)
 end)
+refreshRetButtons()
 
-local allBtn = cfgBtn("✅  Select all rarities")
-allBtn.Activated:Connect(function()
-    playClick()
-    TargetSelector.scanEggs()
-    for _, e in ipairs(AllScannedEggs) do TargetSelector.setRarity(e.Rarity, true) end
-    rebuildRarityList(); log("All rarities selected", LOG_OK)
-end)
-
-local noneBtn = cfgBtn("🚫  Select none")
-noneBtn.Activated:Connect(function()
-    playClick()
-    TargetSelector.scanEggs()
-    for _, e in ipairs(AllScannedEggs) do TargetSelector.setRarity(e.Rarity, false) end
-    rebuildRarityList(); log("All rarities cleared", LOG_WARN)
-end)
-
-local oneShot = cfgBtn("▶  Run ONE steal cycle")
-oneShot.Activated:Connect(function()
-    playClick()
-    TargetSelector.scanEggs()
-    Engine:_bypassOnce()
-    log("=== MANUAL CYCLE ("..Engine:GetMode()..") ===", LOG_WARN)
-    local ok, err = pcall(function() Engine:_cycle() end)
-    if not ok then log("Cycle error: "..tostring(err), LOG_ERR) end
-    refreshStealStats()
-end)
-
--- ── AUTO RUN TUNING ───────────────────────────────────
-cfgLabel("AUTO RUN")
-makeStepper("RUN SPEED", RUN_SPEED, 16, 800, 10, function(v) return tostring(v) end,
+makeStepper("TP OFFSET  (studs up)", TP_OFFSET, 0, 30, 1, function(v) return tostring(v) end,
+    function(v) TP_OFFSET = v end)
+makeStepper("RUN SPEED  (WalkSpeed)", RUN_SPEED, 16, 800, 10, function(v) return tostring(v) end,
     function(v) RUN_SPEED = v end)
 makeStepper("ARRIVE DISTANCE  (studs)", ARRIVE_DIST, 4, 50, 2, function(v) return v.." studs" end,
     function(v) ARRIVE_DIST = v end)
 makeStepper("WALK TIMEOUT  (sec)", WALK_TIMEOUT, 10, 300, 10, function(v) return v.." s" end,
     function(v) WALK_TIMEOUT = v end)
+makeToggle("RE-FIRE EGG PROMPT ON RETURN", GRAB_EGG, function(on) GRAB_EGG = on end)
 
+-- ── DEBUG ────────────────────────────────────────────
+cfgLabel("DEBUG")
 local testBtn = cfgBtn("▶  Trigger Auto Run NOW (test)")
 testBtn.Activated:Connect(function()
-    playClick(); log("=== MANUAL AUTO RUN TEST ===", LOG_WARN)
-    if not AutoRunEnabled then AutoRunEnabled = true end
+    playClick(); log("=== MANUAL RETURN TEST ===", LOG_WARN)
     startAutoRun()
+end)
+
+local tpTestBtn = cfgBtn("⚡  Test TP to base only")
+tpTestBtn.Activated:Connect(function()
+    playClick()
+    local target = getBasePosition()
+    local ok = tpTo(target, TP_OFFSET)
+    log(ok and "TP landed at base" or "TP did NOT stick — server corrected it", ok and LOG_OK or LOG_ERR)
 end)
 
 local spawnScanBtn = cfgBtn("📍  Scan spawn locations")
@@ -2011,26 +919,8 @@ spawnScanBtn.Activated:Connect(function()
         end
     end
     log("=== FOUND "..count.." SpawnLocation(s) ===", count>0 and LOG_OK or LOG_ERR)
-    local root = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+    local root = getRoot()
     if root then log("Your position = "..tostring(root.Position), LOG_INFO) end
-end)
-
-local eggDebugBtn = cfgBtn("🥚  Raw egg container dump")
-eggDebugBtn.Activated:Connect(function()
-    playClick()
-    local container = workspace:FindFirstChild("AreaEggSlotsClient")
-    if not container then log("AreaEggSlotsClient not found!", LOG_ERR); return end
-    local children = container:GetChildren()
-    log("AreaEggSlotsClient has "..#children.." children", LOG_INFO)
-    for i, child in ipairs(children) do
-        if i > 30 then log("... truncated", LOG_WARN); break end
-        log("["..i.."] "..child.ClassName..": '"..child.Name.."'", LOG_INFO)
-        local parts = {}
-        for _, d in ipairs(child:GetDescendants()) do
-            if d:IsA("BasePart") then table.insert(parts, d.Name) end
-        end
-        if #parts > 0 then log("     parts: "..table.concat(parts, ", "), LOG_INFO) end
-    end
 end)
 
 -- ── LOOK ─────────────────────────────────────────────
@@ -2058,13 +948,16 @@ local function applyTheme()
     local t = Themes[ThemeIndex]
     main.BackgroundColor3 = t.Main
     sidebar.BackgroundColor3 = t.Panel
-    btnMinimize.BackgroundColor3 = t.Panel
     btnClose.BackgroundColor3 = t.Panel
     for _,pg in pairs(pages) do pg.ScrollBarImageColor3 = t.Accent end
-    for name,b in pairs(tabButtons) do
+    for _,b in pairs(tabButtons) do
         b.BackgroundColor3 = t.Panel
         local sg = b:FindFirstChild("SweepBg")
-        if sg then sg.BackgroundColor3 = t.Accent; local g = sg:FindFirstChildOfClass("UIGradient"); if g then g.Color = mkSeq(t.Accent) end end
+        if sg then
+            sg.BackgroundColor3 = t.Accent
+            local g = sg:FindFirstChildOfClass("UIGradient")
+            if g then g.Color = mkSeq(t.Accent) end
+        end
     end
     resizeHandle.TextColor3 = t.Accent
     dragLine.BackgroundColor3 = t.Accent
@@ -2074,10 +967,8 @@ themeDec.Activated:Connect(function() playClick(); ThemeIndex = (ThemeIndex-2) %
 themeInc.Activated:Connect(function() playClick(); ThemeIndex = ThemeIndex % #Themes + 1; applyTheme() end)
 
 cfgLabel("WINDOW")
-local infoBtn = cfgBtn("Close (×) • Minimize (—) • drag the bar below")
+local infoBtn = cfgBtn("Close (×) • drag the bar below • F9 = reload")
 infoBtn.TextColor3 = Color3.fromRGB(145,145,155)
-
-rebuildRarityList()
 
 -- ======================================================
 -- DRAGGING & RESIZING
@@ -2124,7 +1015,7 @@ UIS.InputEnded:Connect(function(i)
 end)
 
 -- ======================================================
--- OPEN / CLOSE / MINIMIZE
+-- OPEN / CLOSE
 -- ======================================================
 local openBtn=Instance.new("TextButton"); openBtn.Name="OpenBtn"
 openBtn.AnchorPoint=Vector2.new(1,0.5); openBtn.Position=UDim2.new(1,-18,0.5,0)
@@ -2159,13 +1050,11 @@ UIS.InputEnded:Connect(function(i)
     if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then vxDrag=false end
 end)
 
-local minimized=false; local savedSize=main.Size
-
 local function openGui()
     openBtn.Visible=false; main.Visible=true; shadow.Visible=true
     dragHandle.Visible=true; resizeHandle.Visible=true
-    mainUIScale.Scale=0.72; shadowUIScale.Scale=0.72
     main.BackgroundTransparency=0; shadow.BackgroundTransparency=0.45
+    mainUIScale.Scale=0.80
     tw(mainUIScale,TweenInfo.new(0.28,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
     tw(shadowUIScale,TweenInfo.new(0.28,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
 end
@@ -2177,18 +1066,12 @@ local function closeGui()
         AutoRunEnabled = false
         AutoRunning    = false
         stopSpeedForce()
-        log("GUI closed → Auto Run stopped, speed restored",LOG_WARN)
-    end
-    if StealEnabled then
-        StealEnabled = false
-        Engine:Disable()
-        setStVisual()
-        log("GUI closed → Steal engine stopped",LOG_WARN)
+        log("GUI closed → return-to-base stopped, speed restored", LOG_WARN)
     end
     if AntiHitEnabled then
         AntiHitEnabled = false
         setAhVisual(false)
-        log("GUI closed → Anti Hit disabled",LOG_WARN)
+        log("GUI closed → Anti Hit disabled", LOG_WARN)
     end
     setArVisual("off","OFF")
 
@@ -2204,43 +1087,13 @@ local function closeGui()
     tw(openBtn,TweenInfo.new(0.22,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.fromOffset(64,64)})
 end
 
-local function restoreMin()
-    minimized=false; openBtn.Visible=false
-    main.Visible=true; shadow.Visible=true; sidebar.Visible=true; contentArea.Visible=true
-    dragHandle.Visible=true; resizeHandle.Visible=true
-    main.Size=UDim2.fromOffset(190,45); shadow.Size=UDim2.fromOffset(190,45)
-    mainUIScale.Scale=0.72; shadowUIScale.Scale=0.72
-    main.BackgroundTransparency=0; shadow.BackgroundTransparency=0.45
-    tw(main,TweenInfo.new(0.30,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=savedSize})
-    tw(shadow,TweenInfo.new(0.30,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=savedSize})
-    tw(mainUIScale,TweenInfo.new(0.30,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
-    tw(shadowUIScale,TweenInfo.new(0.30,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Scale=1})
-end
-
 btnClose.Activated:Connect(function() playClick(); closeGui() end)
-btnMinimize.Activated:Connect(function()
-    playClick()
-    if minimized then restoreMin()
-    else
-        minimized=true; savedSize=main.Size
-        sidebar.Visible=false; contentArea.Visible=false
-        resizeHandle.Visible=false; dragHandle.Visible=false
-        local out=TweenInfo.new(0.24,Enum.EasingStyle.Quart,Enum.EasingDirection.In)
-        tw(mainUIScale,out,{Scale=0.78}); tw(shadowUIScale,out,{Scale=0.78})
-        tw(main,out,{BackgroundTransparency=1,Size=UDim2.fromOffset(1,1)})
-        tw(shadow,out,{BackgroundTransparency=1,Size=UDim2.fromOffset(1,1)})
-        task.wait(0.25); main.Visible=false; shadow.Visible=false
-        main.Size=savedSize; shadow.Size=savedSize; mainUIScale.Scale=1; shadowUIScale.Scale=1
-        openBtn.Visible=true; openBtn.Size=UDim2.fromOffset(8,8)
-        tw(openBtn,TweenInfo.new(0.30,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.fromOffset(64,64)})
-    end
-end)
-openBtn.Activated:Connect(function() playClick(); if minimized then restoreMin() else openGui() end end)
+openBtn.Activated:Connect(function() playClick(); openGui() end)
 
 -- ======================================================
+-- INTRO
+-- ======================================================
 local function runIntro()
-    -- INTRO
-    -- ======================================================
     main.Visible=false; shadow.Visible=false; dragHandle.Visible=false; resizeHandle.Visible=false
 
     local intro=Instance.new("Frame"); intro.Name="VirexIntro"; intro.Size=UDim2.fromScale(1,1)
@@ -2319,29 +1172,18 @@ refreshTabs()
 -- ======================================================
 -- RELOAD / SHUTDOWN
 -- ======================================================
--- Anything long-lived must be reachable from here, otherwise a reload leaves
--- an orphaned engine thread looping forever on the previous run's closure.
 RUN.shutdown = function()
-    pcall(function() if StealEnabled or Engine:IsEnabled() then
-        StealEnabled = false; Engine:Disable()
-    end end)
-    pcall(function() if AutoRunning or AutoRunEnabled then
-        AutoRunEnabled = false; AutoRunning = false; stopSpeedForce()
-    end end)
+    pcall(function() AutoRunEnabled = false; AutoRunning = false; stopSpeedForce() end)
     pcall(function() AntiHitEnabled = false end)
     pcall(function() gui:Destroy() end)
 end
-
 rawset(HOST, "VirexHub", RUN)
 
 local reloadBtn = cfgBtn("⟳  Reload script from GitHub" .. (HAS_LOADSTRING and "" or "  (no loadstring)"))
 reloadBtn.TextColor3 = HAS_LOADSTRING and LOG_INFO or Color3.fromRGB(120,120,130)
 reloadBtn.Activated:Connect(function()
     playClick()
-    if not HAS_LOADSTRING then
-        log("loadstring unavailable in this environment", LOG_ERR)
-        return
-    end
+    if not HAS_LOADSTRING then log("loadstring unavailable in this environment", LOG_ERR); return end
     reloadScript()
 end)
 
@@ -2356,14 +1198,10 @@ urlBtn.Activated:Connect(function()
     log(ok and "Loader one-liner copied to clipboard" or "Could not reach clipboard", ok and LOG_OK or LOG_WARN)
 end)
 
--- F9 = reload. Runs a frame later so the press isn't caught by this run.
 UIS.InputBegan:Connect(function(input, processed)
     if processed then return end
-    if input.KeyCode == Enum.KeyCode.F9 then
-        task.defer(function()
-            if HAS_LOADSTRING then reloadScript() end
-        end)
-        return
+    if input.KeyCode == Enum.KeyCode.F9 and HAS_LOADSTRING then
+        task.defer(reloadScript)
     end
 end)
 
@@ -2371,12 +1209,10 @@ end)
 -- STARTUP LOG
 -- ======================================================
 task.delay(1, function()
-    log("=== VIREX ANTI-GUARD v3 (merged) ===", LOG_OK)
+    log("=== VIREX ANTI-GUARD v4 (Anti Hit + Auto Run Base) ===", LOG_OK)
     log("loadstring: "..(HAS_LOADSTRING and "available (F9 = reload)" or "UNAVAILABLE"), HAS_LOADSTRING and LOG_OK or LOG_WARN)
-    log("fireproximityprompt: "..(type(fireproximityprompt)=="function" and "available" or "MISSING — switch Carry Method to REMOTE/BOTH"),
+    log("fireproximityprompt: "..(type(fireproximityprompt)=="function" and "available" or "MISSING — re-fire egg prompt will not work"),
         type(fireproximityprompt)=="function" and LOG_OK or LOG_ERR)
-    log("Carry remote: "..(CarryRemote and CarryRemote:GetFullName() or "NOT FOUND"), CarryRemote and LOG_OK or LOG_ERR)
-    log("Drop  remote: "..(DropRemote  and DropRemote:GetFullName()  or "NOT FOUND"), DropRemote  and LOG_INFO or LOG_WARN)
-    log("Steal engine ready — mode="..Engine:GetMode().." carry="..Engine:GetSteal():GetConfig().CarryMethod, LOG_INFO)
-    log("Config > Scan Eggs, then Run ONE steal cycle", LOG_INFO)
+    log("Return method: "..(RETURN_TP and "TELEPORT (self-verifying, falls back to walk)" or "WALK"), LOG_INFO)
+    log("Toggle ANTI HIT, then interact with an egg — route runs, then returns home", LOG_INFO)
 end)
