@@ -270,3 +270,12 @@ The guard-detection, fast-click, glide-TP and safe-zone mechanics are adapted fr
 [`hotibody99828/stealvip2`](https://github.com/hotibody99828/stealvip2) — specifically
 `Features/AntiGuard.lua` (`SAFE_ZONE`, `StartFastClick`, camera lock) and
 `Features/DropEgg.lua` (`BodyVelocity`/`BodyGyro` glide with a late CFrame snap).
+
+## Dodge pacing
+
+The game's guard re-arms as soon as you move, which without a floor on dodge
+frequency becomes a feedback loop — dodge, route done, dodge again, forever.
+There is a 3-second cooldown between dodges, and after landing at base with an
+egg the script holds perfectly still for up to 6 seconds so the deposit can
+commit. Moving during that window is what caused "the egg was delivered but
+never appeared in the bag".

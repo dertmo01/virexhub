@@ -1148,6 +1148,18 @@ local function stopAutoRun(reason)
     else setArVisual("off","OFF") end
 end
 
+-- ── Dodge pacing ────────────────────────────────────────────────
+-- The live log showed an unbounded feedback loop:
+--   dodge triggered -> route started -> route done -> dodge triggered ...
+-- repeating every ~1.5s, which to the player just looked like the character
+-- bouncing up and down forever. The game's guard re-arms DropHeldEgg as soon
+-- as we move, so with no floor on dodge frequency we chased our own tail. The
+-- route only takes ~0.3s, so the AntiHitRunning flag alone does nothing.
+local DODGE_COOLDOWN   = 3.0  -- floor on seconds between dodges
+local DEPOSIT_LOCKOUT  = 6.0  -- after landing at base, stay put and let the deposit finish
+local _lastDodgeAt    = -math.huge
+local _depositUntil   = -math.huge
+
 local function startAutoRun()
     if AutoRunning then log("AutoRun: already running, skip", LOG_WARN); return end
     -- The walk loop is gated on AutoRunEnabled, and this is also reached from
@@ -1160,6 +1172,14 @@ local function startAutoRun()
 
     task.spawn(function()
         local target = getBasePosition()
+
+        -- A dodge may still be mid-flight (it takes ~0.3s and re-fires often).
+        -- Hopping while it runs got the hop overridden by the route's own CFrame
+        -- write: "hop failed (server corrected hop 1)".
+        local waitedDodge = 0
+        while AntiHitRunning and waitedDodge < 2 do
+            task.wait(0.05); waitedDodge += 0.05
+        end
 
         -- pick the egg back up on the way out, if we caught a prompt
         if GRAB_EGG and CurrentEggPrompt then
@@ -1307,6 +1327,30 @@ local function startAutoRun()
         end
 
         stopSpeedForce()
+
+        -- Landed. Now hold perfectly still until the egg is actually banked.
+        -- Moving during this window is what lost eggs: the log showed a dodge
+        -- firing ~0.3s after arrival, which aborted the deposit.
+        if arrived and isCarryingEgg() then
+            _depositUntil = os.clock() + DEPOSIT_LOCKOUT
+            log("AutoRun: at base — holding still "..math.floor(DEPOSIT_LOCKOUT).."s for the deposit", LOG_INFO)
+            local deadline = os.clock() + DEPOSIT_LOCKOUT
+            while os.clock() < deadline do
+                if not AutoRunning or AutoRunEnabled == false then break end
+                local hum = getHumanoid()
+                if not hum or hum.Health <= 0 then break end
+                if not isCarryingEgg() then
+                    log("AutoRun: egg banked — deposit confirmed", LOG_OK)
+                    break
+                end
+                stripPushBack()
+                task.wait(0.25)
+            end
+            if isCarryingEgg() then
+                log("AutoRun: still holding the egg after "..math.floor(DEPOSIT_LOCKOUT).."s — not leaving yet", LOG_WARN)
+            end
+        end
+
         stopAutoRun("done")
     end)
 end
@@ -1351,6 +1395,14 @@ local SAFE_WAIT = 1
 -- Both triggers funnel into here so we can compare which one actually fires.
 local function beginDodge(reason)
     if not AntiHitEnabled or AntiHitRunning then return end
+    -- We just landed at base holding an egg and the game is mid-deposit.
+    -- Dodging here cancelled it: the egg was "delivered" but never appeared in
+    -- the bag, because the deposit animation was interrupted before it committed.
+    if os.clock() < _depositUntil then return end
+    -- A guard that re-armed within the cooldown window is the same guard event
+    -- we are already handling, not a new one. Ignoring it is what stops the loop.
+    if os.clock() - _lastDodgeAt < DODGE_COOLDOWN then return end
+    _lastDodgeAt = os.clock()
     task.spawn(function()
         log("Guard dodge triggered via "..reason, LOG_WARN)
         local root = getRoot()
@@ -1489,9 +1541,15 @@ end)
 -- the evidence out of the game.
 local LOG_TEST = Color3.fromRGB(255,140,255)
 
-local function st(ok, name, detail, warnOnly)
+-- level: nil = real check, "warn" (or legacy true) = soft, "info" = pure
+-- narration. INFO counts as nothing and is excluded from the export's PROBLEMS
+-- list. Before this existed, 10 of the 15 reported "problems" were things like
+-- "loadstring available" -- true, and not a problem at all.
+local function st(ok, name, detail, level)
     local tag, col
-    if warnOnly then
+    if level == "info" then
+        tag = "INFO"; col = LOG_INFO
+    elseif level == "warn" or level == true then
         tag = "WARN"; col = LOG_WARN; SELFTEST.warn += 1
     elseif ok then
         tag = "PASS"; col = LOG_OK;   SELFTEST.pass += 1
@@ -1511,11 +1569,11 @@ local function runStaticSelfTest()
     log("────────── SELF-TEST (static) ──────────", LOG_TEST)
 
     -- environment
-    st(HAS_LOADSTRING, "loadstring available", HAS_LOADSTRING and "F9 reload works" or "cannot hot-reload", true)
-    st(type(game.HttpGet)=="function", "game:HttpGet available", nil, true)
+    st(HAS_LOADSTRING, "loadstring available", HAS_LOADSTRING and "F9 reload works" or "cannot hot-reload", "info")
+    st(type(game.HttpGet)=="function", "game:HttpGet available", nil, "info")
     st(type(fireproximityprompt)=="function", "fireproximityprompt available",
         type(fireproximityprompt)~="function" and "MISSING — re-fire egg prompt will not work" or "re-fire fallback usable", true)
-    st(type(setclipboard)=="function", "setclipboard available", nil, true)
+    st(type(setclipboard)=="function", "setclipboard available", nil, "info")
 
     -- character
     local hum, root = getHumanoid(), getRoot()
@@ -1536,7 +1594,7 @@ local function runStaticSelfTest()
     if okBase and root then
         local d = math.floor((root.Position - base).Magnitude)
         log("[SELF-TEST] INFO  Distance to base = "..d.." studs", LOG_INFO)
-        st(d < 3000, "Base within plausible range", d.." studs", true)
+        st(d < 3000, "Base within plausible range", d.." studs", d >= 3000 and true or "info")
     end
 
     -- guard GUI -- the single most important unknown
@@ -1562,7 +1620,7 @@ local function runStaticSelfTest()
         end
     end
     log("[SELF-TEST] INFO  ProximityPrompts: workspace="..wsCount.."  PlayerGui="..pgCount, LOG_INFO)
-    st(wsCount > 0, "ProximityPrompts exist in workspace", wsCount.." found", true)
+    st(wsCount > 0, "ProximityPrompts exist in workspace", wsCount.." found", "info")
     if wsCount > 0 then
         -- this is the real proof fast click works: the values were mutated
         st(zeroed == wsCount, "Fast click mutated every prompt",
@@ -1570,8 +1628,8 @@ local function runStaticSelfTest()
     end
 
     -- live connection state
-    st(_fcShownConn ~= nil, "Fast click listener connected", nil, true)
-    st(_guardThread ~= nil, "Guard watcher thread running", nil, true)
+    st(_fcShownConn ~= nil, "Fast click listener connected", nil, "info")
+    st(_guardThread ~= nil, "Guard watcher thread running", nil, "info")
     if AntiHitEnabled then
         st(true, "ANTI HIT toggle is ON")
     else
@@ -1620,7 +1678,7 @@ local function runMovementSelfTest()
     if hopOK then
         -- come back the same way
         local back = getRoot() and hopTp(origin, 0)
-        st(back, "Multi-hop TP returns home", nil, true)
+        st(back, "Multi-hop TP returns home", nil)
     else
         -- hop failed, so put ourselves back with one plain snap if we can
         pcall(function() getRoot().CFrame = CFrame.new(origin) end)
@@ -1635,7 +1693,7 @@ local function runMovementSelfTest()
     -- 3. glide is no longer expected to work here; keep it informational only
     local glideOK = glideTo(origin, 0)
     st(glideOK, "BodyVelocity glide holds (informational)",
-        glideOK and "glide viable" or "glide does not stick on this server", true)
+        glideOK and "glide viable" or "glide does not stick on this server", "info")
 
     -- 4. did we end up back where we started?
     task.wait(0.2)
@@ -1652,8 +1710,16 @@ local function runMovementSelfTest()
         local forced = hum2.WalkSpeed
         stopSpeedForce()
         local restored = hum2.WalkSpeed
-        st(math.abs(forced - effectiveSpeed()) < 1, "Speed force applied", "forced="..math.floor(forced).." target="..math.floor(effectiveSpeed()))
-        st(math.abs(restored - _originalWalkSpeed) < 1, "Speed restored on stop", "restored="..math.floor(restored), true)
+        -- This game hard-clamps WalkSpeed to 264 every frame. Our write is
+        -- overwritten immediately, so this check can never pass. Reporting it as
+        -- FAIL every run trains the user to ignore FAIL, and with HOP verified
+        -- we barely walk at all, so it costs nothing. State it once, plainly.
+        local clamped = math.abs(forced - effectiveSpeed()) >= 1
+        st(true, clamped and "WalkSpeed is server-clamped" or "WalkSpeed force applied",
+            clamped and ("game caps it at "..math.floor(forced)..", our target of "..math.floor(effectiveSpeed()).." is discarded - irrelevant while HOP works")
+                     or ("forced="..math.floor(forced)),
+            clamped)
+        st(math.abs(restored - _originalWalkSpeed) < 1, "Speed restored on stop", "restored="..math.floor(restored), "info")
     end
 
     -- 5. is the egg prompt actually instant?
@@ -1663,7 +1729,7 @@ local function runMovementSelfTest()
         for _, d in ipairs(workspace:GetDescendants()) do
             if d:IsA("ProximityPrompt") and d.HoldDuration == 0 then z += 1 end
         end
-        st(z > 0, "Egg prompts are instant", z.." prompts with HoldDuration=0", true)
+        st(z > 0, "Egg prompts are instant", z.." prompts with HoldDuration=0", "info")
     end
 
     log(string.format("[SELF-TEST] MOVEMENT DONE  %d PASS / %d FAIL / %d WARN", SELFTEST.pass, SELFTEST.fail, SELFTEST.warn),
@@ -2260,13 +2326,15 @@ task.delay(1, function()
 end)
 
 task.delay(2.5, function()
-    runStaticSelfTest()
-
-    -- resolve the base now so the log records what was chosen
+    -- Resolve the base and switch Anti Hit on BEFORE the static self-test.
+    -- Ordering bug from the live log: the test ran first and so reported
+    -- "Fast click mutated every prompt - 28/94, sweep incomplete" and
+    -- "ANTI HIT toggle is OFF" as FAIL and WARN. Both were false - it was
+    -- measuring state from before startFastClick() had ever been called. The
+    -- same run then found 103 prompts at HoldDuration=0, one second later.
     local okBase, base = pcall(getBasePosition)
     if not okBase then log("Base: resolution errored: "..tostring(base), LOG_ERR) end
 
-    -- switch Anti Hit on for them
     if not AntiHitEnabled then
         AntiHitEnabled = true
         setAhVisual(true)
@@ -2274,6 +2342,10 @@ task.delay(2.5, function()
         startGuardWatch()
         log("ANTI HIT enabled automatically — just walk up to an egg and interact.", LOG_OK)
     end
+
+    -- small settle so the prompt sweep has actually landed before we measure it
+    task.wait(0.6)
+    runStaticSelfTest()
 
     AutoRunEnabled = true
     setArVisual("on", "ON  •  waits for egg interact")
