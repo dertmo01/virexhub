@@ -501,7 +501,11 @@ local function tpTo(position, offsetY)
     -- set WalkSpeed = 0 and never restore it, so a single teleport left the
     -- player unable to walk -- the export showed "game caps it at 0, our
     -- target of 300 is discarded" and AutoRun crawling at 232.
+    -- Never bank a 0 as the value to restore. The export read "game caps it at 0"
+    -- because tpTo captured a speed that had already been zeroed elsewhere and
+    -- faithfully restored the zero.
     local savedSpeed = hum.WalkSpeed
+    if savedSpeed == nil or savedSpeed <= 1 then savedSpeed = 264 end
     pcall(function()
         hum:MoveTo(root.Position)
         hum.WalkSpeed = 0
@@ -2003,16 +2007,27 @@ local function runMovementSelfTest()
     -- Each probe starts from the origin, so a failure can't silently become a
     -- no-op for the next one. Previously flowTp landed on `far` and then the
     -- hop probe measured a distance of zero and reported a free pass.
+    -- Must travel back using a method the server accepts. This used to write the
+    -- CFrame directly, which is precisely what gets corrected -- so it silently
+    -- did nothing. The export caught the consequence twice over:
+    --   FAIL Returned to origin -- drift=180 studs
+    --   PASS Multi-hop TP holds over 180 studs -- landed in 0 hops
+    -- The second one is worse than a failure: because we were still standing on
+    -- the probe point, the hop probe measured a distance of zero and reported a
+    -- clean pass for a method that had never run.
     local function goHome()
-        pcall(function()
-            local rr = getRoot()
-            if rr then
-                rr.CFrame = CFrame.new(origin)
-                rr.AssemblyLinearVelocity  = Vector3.zero
-                rr.AssemblyAngularVelocity = Vector3.zero
-            end
-        end)
-        task.wait(0.35)
+        local ok = flowTp(origin, 0, "restore")
+        if not ok then
+            pcall(function()
+                local rr = getRoot()
+                if rr then
+                    rr.CFrame = CFrame.new(origin)
+                    rr.AssemblyLinearVelocity  = Vector3.zero
+                    rr.AssemblyAngularVelocity = Vector3.zero
+                end
+            end)
+        end
+        task.wait(0.3)
     end
 
     -- 0. frame-stepped flow over a long distance -- this is the one that should
@@ -2028,10 +2043,11 @@ local function runMovementSelfTest()
         hopOK and ("landed in "..tostring(hopInfo).." hops") or ("failed: "..tostring(hopInfo)))
     goHome()
 
-    -- 2. does a single direct CFrame snap hold at all?
-    local snapOK = tpTo(origin, 3)
-    st(snapOK, "Direct CFrame snap holds (3 studs up)",
-        snapOK and "short TELEPORT jumps are accepted" or "even short snaps are corrected")
+    -- Direct CFrame snaps are NOT probed. The export reported "even short snaps
+    -- are corrected" on every single run, at 3 studs, and tpTo also leaves
+    -- WalkSpeed at 0 long enough for the speed check to read it. A probe that
+    -- cannot pass is noise, and it was also corrupting the next probe by
+    -- stranding us. tpTo remains available as a self-verifying chain link.
 
     -- 3. glide is no longer expected to work here; keep it informational only
     local glideOK = glideTo(origin, 0)
@@ -2289,7 +2305,7 @@ end
 local RET_LABEL = {
     FLOW = "FLOW (frame-stepped, adapts to the server's tolerance - fastest)",
     HOP  = "HOP (35-stud verified hops)",
-    TELEPORT = "TELEPORT (direct CFrame snap, only good for short hops)",
+    TELEPORT = "TELEPORT (direct CFrame snap - this server corrects even 3-stud snaps, so it usually just fails over)",
     GLIDE = "GLIDE (BodyVelocity + late CFrame snap)",
     WALK = "WALK (no position writes at all)",
 }
